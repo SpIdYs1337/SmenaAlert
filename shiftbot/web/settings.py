@@ -112,21 +112,32 @@ def public(settings: dict) -> dict:
             "has_password": bool(settings.get("secret"))}
 
 
-def smtp_settings(data: dict, before: dict, vault: Vault) -> dict:
-    host = text(data, "host", "SMTP-сервер", limit=253)
+def mail_connection(data: dict, protocol: str, *, login_required: bool) -> dict:
+    host = text(data, "host", f"{protocol}-сервер", limit=253)
     if any(c.isspace() or c in "/@?#\\" for c in host):
-        raise InputError("Укажите имя SMTP-сервера без протокола и пути.")
+        raise InputError(f"Укажите имя {protocol}-сервера без протокола и пути.")
     security = data.get("security")
     if security not in ("ssl", "starttls"):
         raise InputError("Выберите SSL/TLS или STARTTLS.")
-    result = {
+    return {
         "host": host.lower(),
         "port": number(data.get("port"), "Порт", 1, 65535),
         "security": security,
-        "login": text(data, "login", "Логин SMTP", required=False, limit=254),
+        "login": text(data, "login", f"Логин {protocol}", required=login_required, limit=254),
+    }
+
+
+def smtp_settings(data: dict, before: dict, vault: Vault) -> dict:
+    result = mail_connection(data, "SMTP", login_required=False) | {
         "sender": email_address(data.get("sender")),
         "sender_name": text(data, "sender_name", "Имя отправителя", required=False, limit=120),
     }
+    result["secret"] = store_secret(data, before, ("host", "port", "security", "login"), result, vault)
+    return result
+
+
+def imap_settings(data: dict, before: dict, vault: Vault) -> dict:
+    result = mail_connection(data, "IMAP", login_required=True) | {"email": email_address(data.get("email"))}
     result["secret"] = store_secret(data, before, ("host", "port", "security", "login"), result, vault)
     return result
 

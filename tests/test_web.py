@@ -1,4 +1,5 @@
 import asyncio
+import imaplib
 import re
 import tempfile
 import unittest
@@ -16,7 +17,7 @@ from shiftbot.config import DAYS, MSK
 from shiftbot.domain import Shift
 from shiftbot.iiko import IikoError
 from shiftbot.web.app import create_app
-from shiftbot.web.mail import Mailer, MailError
+from shiftbot.web.mail import Mailbox, Mailer, MailError
 from shiftbot.web.service import Service
 from shiftbot.web.settings import Vault
 from shiftbot.web.storage import Database
@@ -31,6 +32,21 @@ class FixtureMail:
         if recipient in self.rejected:
             raise MailError("Адрес временно недоступен.", retryable=True)
         self.messages.append((recipient, subject, body, password))
+        return f"<test-{key}@example.org>"
+
+
+class FixtureMailbox:
+    def __init__(self):
+        self.received = set()
+        self.error = None
+
+    def probe(self, _settings, _password):
+        if self.error is not None:
+            raise self.error
+
+    def contains(self, settings, password, message_id):
+        self.probe(settings, password)
+        return message_id in self.received
 
 
 class WebPanelTests(unittest.TestCase):
@@ -41,6 +57,7 @@ class WebPanelTests(unittest.TestCase):
         self.db = Database(directory / "panel.sqlite3")
         self.vault = Vault(directory / "key")
         self.smtp = FixtureMail()
+        self.imap = FixtureMailbox()
         self.current = datetime(2026, 11, 18, 9, 10, tzinfo=MSK)
         source = self
 
@@ -54,7 +71,8 @@ class WebPanelTests(unittest.TestCase):
                 return source.shifts.get(outlet.name, [])
 
         self.shifts = {}
-        self.service = Service(self.db, self.vault, mailer=self.smtp, iiko_factory=FixtureIiko, now=lambda: self.current)
+        self.service = Service(self.db, self.vault, mailer=self.smtp, mailbox=self.imap,
+                               iiko_factory=FixtureIiko, now=lambda: self.current)
         self.app = create_app(self.service, admin="admin", password="fixture-panel-password")
         self.client = self.app.test_client()
 
@@ -193,9 +211,70 @@ class WebPanelTests(unittest.TestCase):
         cfg = {"host": "smtp.example.org", "port": 587, "security": "starttls", "login": "alerts@example.org",
                "sender": "alerts@example.org", "sender_name": "Контроль открытия"}
         with patch("shiftbot.web.mail.smtplib.SMTP") as smtp:
-            Mailer().send(cfg, "test-credential", "tom@example.org", "Проверка", "Тестовое письмо.", key=1)
+            message_id = Mailer().send(cfg, "test-credential", "tom@example.org", "Проверка", "Тестовое письмо.", key=1)
             methods = [call[0] for call in smtp.return_value.method_calls]
             self.assertLess(methods.index("starttls"), methods.index("login"))
             message = smtp.return_value.send_message.call_args[0][0]
             self.assertEqual(str(message["To"]), "tom@example.org")
             self.assertIn("alerts@example.org", str(message["From"]))
+            self.assertEqual(message_id, str(message["Message-ID"]))
+
+    def test_imap_settings_and_receipt_of_specific_test_letter(self):
+        self.configure()
+        self.service.start()
+        self.addCleanup(self.service.close)
+        self.write("POST", "/imap/probe", {}, 400)
+        config = {"host": "imap.example.org", "port": 993, "security": "ssl", "login": "alerts@example.org",
+                  "email": "alerts@example.org", "password": "fixture-imap-secret"}
+        self.assertEqual(self.client.put("/api/imap", json=config).status_code, 403)
+        self.write("PUT", "/imap", config | {"security": "plain"}, 400)
+        self.write("PUT", "/imap", config)
+        self.write("PUT", "/imap", config | {"host": "other.example.org", "password": ""}, 400)
+        self.imap.error = MailError("Папка «Входящие» недоступна по IMAP.")
+        self.write("POST", "/imap/probe", {}, 502)
+        self.assertFalse(self.service.snapshot()["imap"]["health"]["ok"])
+        self.imap.error = None
+        self.write("POST", "/imap/probe", {})
+        overview = self.client.get("/api/dashboard")
+        self.assertTrue(overview.get_json()["imap"]["health"]["ok"])
+        self.assertNotIn(b"fixture-imap-secret", overview.data)
+        self.assertNotIn(b"fixture-imap-secret", self.db.path.read_bytes())
+        test = self.write("POST", "/smtp/test", {"email": config["email"]}, 202)["id"]
+        other = self.write("POST", "/smtp/test", {"email": "other@example.org"}, 202)["id"]
+        self.service.call(self.service.deliver)
+        self.assertTrue(self.client.get(f"/api/history/{test}").get_json()["can_check_imap"])
+        self.assertFalse(self.client.get(f"/api/history/{other}").get_json()["can_check_imap"])
+        self.write("POST", f"/history/{other}/imap", {}, 400)
+        self.imap.received.add(f"<test-{other}@example.org>")
+        self.assertEqual(self.write("POST", f"/history/{test}/imap", {}), {"found": False})
+        self.imap.received.add(f"<test-{test}@example.org>")
+        self.assertEqual(self.write("POST", f"/history/{test}/imap", {}), {"found": True})
+        self.assertEqual(self.db.delivery(test)["status"], "sent")
+
+    def test_imap_starttls_search_opens_inbox_readonly(self):
+        config = {"host": "imap.example.org", "port": 143, "security": "starttls", "login": "alerts@example.org"}
+        imap_class = imaplib.IMAP4
+        with patch("shiftbot.web.mail.imaplib.IMAP4", error=imap_class.error, abort=imap_class.abort) as imap:
+            connection = imap.return_value
+            connection.select.return_value = ("OK", [b"3"])
+            connection.search.return_value = ("OK", [b"2"])
+            self.assertTrue(Mailbox().contains(config, "app-password", "<test@example.org>"))
+            self.assertEqual([call[0] for call in connection.method_calls], ["starttls", "login", "select", "search", "logout"])
+            self.assertTrue(connection.starttls.call_args.kwargs["ssl_context"].check_hostname)
+            connection.select.assert_called_once_with("INBOX", readonly=True)
+            connection.search.assert_called_once_with(None, "HEADER", "Message-ID", '"<test@example.org>"')
+            connection.reset_mock()
+            connection.starttls.side_effect = imap_class.error("fixture server text")
+            with self.assertRaisesRegex(MailError, "STARTTLS"):
+                Mailbox().probe(config, "app-password")
+            connection.login.assert_not_called()
+
+    def test_upgrade_keeps_letters_without_message_id(self):
+        self.configure()
+        test = self.service.queue_test("alerts@example.org")
+        self.db.finish(test, "sent", 1)
+        with self.db.connection() as db:
+            db.execute("ALTER TABLE deliveries DROP COLUMN message_id")
+        upgraded = Database(self.db.path)
+        self.assertEqual(upgraded.delivery(test)["status"], "sent")
+        self.assertIsNone(upgraded.delivery(test)["message_id"])

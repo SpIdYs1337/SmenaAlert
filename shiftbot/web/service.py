@@ -13,8 +13,8 @@ from ..config import MSK, Outlet
 from ..domain import evaluate, opening_time
 from ..http import Http
 from ..iiko import Iiko, IikoError
-from .mail import Mailer, MailError
-from .settings import Endpoint, InputError, Vault, as_outlet, public
+from .mail import Mailbox, Mailer, MailError
+from .settings import Endpoint, InputError, Vault, as_outlet, imap_settings, public
 from .storage import Database
 
 log = logging.getLogger(__name__)
@@ -31,6 +31,11 @@ def clock_label(value: str | None) -> str:
 def revision(point: dict, server: dict, prefs: dict) -> str:
     data = [point, server, prefs["inclusive"], prefs["delay_seconds"]]
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def can_check_receipt(job: dict, config: dict) -> bool:
+    return (job["kind"] == "test" and job["status"] == "sent" and bool(job["message_id"])
+            and job["recipient"] == config.get("email"))
 
 
 STATES = {
@@ -60,9 +65,10 @@ def letter(point: dict, state: dict, now: datetime, kind: str, note: str = "") -
 
 
 class Service:
-    def __init__(self, db: Database, vault: Vault, *, mailer=None, iiko_factory=Iiko, now=None):
+    def __init__(self, db: Database, vault: Vault, *, mailer=None, mailbox=None, iiko_factory=Iiko, now=None):
         self.db, self.vault = db, vault
         self.mailer = mailer or Mailer()
+        self.mailbox = mailbox or Mailbox()
         self.iiko_factory = iiko_factory
         self.now = now or (lambda: datetime.now(MSK))
         self.http = Http()
@@ -70,6 +76,7 @@ class Service:
         self._check_lock = asyncio.Lock()
         self._client_lock = asyncio.Lock()
         self._smtp_lock = asyncio.Lock()
+        self._imap_lock = asyncio.Lock()
         self._thread = None
         self._loop = None
         self._ready = threading.Event()
@@ -263,6 +270,7 @@ class Service:
                 "servers": [public(server) | {"health": self.db.get_setting(f"health:{server['id']}")}
                             for server in self.db.list("servers")],
                 "smtp": public(self.db.get_setting("smtp", {})), "smtp_health": self.db.get_setting("health:smtp"),
+                "imap": public(self.db.get_setting("imap", {})),
                 "monitor": self.db.preferences(), "history": self.db.history(), "now": stamp(self.now())}
 
     def manual_preview(self, point_id: str, note: str):
@@ -301,6 +309,36 @@ class Service:
                 raise
             self.db.save_setting("health:smtp", {"ok": True, "message": "Соединение с SMTP установлено."})
 
+    async def save_imap(self, payload: dict):
+        async with self._imap_lock:
+            config = imap_settings(payload, self.db.get_setting("imap", {}), self.vault)
+            self.db.save_setting("imap", config)
+
+    def _imap_config(self):
+        config = self.db.get_setting("imap")
+        if not config:
+            raise InputError("Сначала сохраните настройки IMAP.")
+        return config, self.vault.decrypt(config["secret"])
+
+    async def probe_imap(self):
+        async with self._imap_lock:
+            config, password = self._imap_config()
+            try:
+                await asyncio.to_thread(self.mailbox.probe, config, password)
+            except MailError as error:
+                config["health"] = {"ok": False, "message": str(error)}
+                self.db.save_setting("imap", config)
+                raise
+            config["health"] = {"ok": True, "message": "Папка «Входящие» доступна по IMAP."}
+            self.db.save_setting("imap", config)
+
+    async def check_receipt(self, job: dict) -> bool:
+        async with self._imap_lock:
+            config, password = self._imap_config()
+            if not can_check_receipt(job, config):
+                raise InputError("Отправьте тестовое письмо на адрес подключённого ящика IMAP.")
+            return await asyncio.to_thread(self.mailbox.contains, config, password, job["message_id"])
+
     def _auto_valid(self, job: dict, now: datetime) -> bool:
         prefs = self.db.preferences()
         if not prefs["enabled"] or job["day"] != now.date().isoformat():
@@ -337,11 +375,12 @@ class Service:
                         if current.get("status") == "late_open":
                             subject, body = letter({"name": job["point_name"]}, current, now, "auto")
                             self.db.refresh_letter(job["id"], "late_open", subject, body)
-                    await asyncio.to_thread(self.mailer.send, config, password, job["recipient"], subject, body,
-                                            key=job["id"])
+                    message_id = await asyncio.to_thread(self.mailer.send, config, password, job["recipient"],
+                                                         subject, body, key=job["id"])
                 except (MailError, InputError) as error:
                     temporary = isinstance(error, MailError) and error.retryable and attempts < 3 and job["kind"] != "test"
                     retry = stamp(now + timedelta(minutes=attempts)) if temporary else None
                     self.db.finish(job["id"], "queued" if temporary else "failed", attempts, error=str(error), retry_at=retry)
                 else:
-                    self.db.finish(job["id"], "sent", attempts, delivered_at=stamp(self.now()))
+                    self.db.finish(job["id"], "sent", attempts, delivered_at=stamp(self.now()),
+                                   message_id=message_id if job["kind"] == "test" else None)

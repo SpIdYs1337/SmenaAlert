@@ -31,7 +31,8 @@ def start(directory: Path, args, admin: str, password: str):
             raise ConfigError("Панель уже запущена с этим каталогом данных.") from None
         db, vault = Database(directory / "panel.sqlite3"), Vault(directory / ".panel-key")
         if args.demo:
-            service = Service(db, vault, mailer=DemoMail(), iiko_factory=DemoIiko, now=demo_now)
+            mail = DemoMail()
+            service = Service(db, vault, mailer=mail, mailbox=mail, iiko_factory=DemoIiko, now=demo_now)
             seed(service)
         else:
             service = Service(db, vault)
@@ -50,12 +51,12 @@ def start(directory: Path, args, admin: str, password: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Веб-панель iiko и SMTP")
+    parser = argparse.ArgumentParser(description="Веб-панель iiko с SMTP и IMAP")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--data-dir", default="data")
     parser.add_argument("--env-file", default=".env.web")
-    parser.add_argument("--demo", action="store_true", help="Временные данные и имитация iiko и SMTP")
+    parser.add_argument("--demo", action="store_true", help="Временные данные и имитация iiko, SMTP и IMAP")
     args = parser.parse_args()
     os.umask(0o077)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")

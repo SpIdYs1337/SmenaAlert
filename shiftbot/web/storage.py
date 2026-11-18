@@ -42,10 +42,13 @@ class Database:
                     recipient TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL,
                     created_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued',
                     attempts INTEGER NOT NULL DEFAULT 0, retry_at TEXT, delivered_at TEXT,
-                    error TEXT, revision TEXT
+                    error TEXT, revision TEXT, message_id TEXT
                 );
                 CREATE INDEX IF NOT EXISTS deliveries_ready ON deliveries(status,retry_at,id);
             """)
+            db.execute("BEGIN IMMEDIATE")
+            if not any(column["name"] == "message_id" for column in db.execute("PRAGMA table_info(deliveries)")):
+                db.execute("ALTER TABLE deliveries ADD COLUMN message_id TEXT")
 
     @contextmanager
     def connection(self):
@@ -184,10 +187,11 @@ class Database:
                 "SELECT * FROM deliveries WHERE status='queued' AND (retry_at IS NULL OR retry_at<=?) ORDER BY id LIMIT ?",
                 (when, limit))]
 
-    def finish(self, job_id: int, status: str, attempts: int, *, error=None, retry_at=None, delivered_at=None):
+    def finish(self, job_id: int, status: str, attempts: int, *, error=None, retry_at=None, delivered_at=None,
+               message_id=None):
         with self.connection() as db:
-            db.execute("UPDATE deliveries SET status=?,attempts=?,error=?,retry_at=?,delivered_at=? WHERE id=?",
-                       (status, attempts, error, retry_at, delivered_at, job_id))
+            db.execute("UPDATE deliveries SET status=?,attempts=?,error=?,retry_at=?,delivered_at=?,message_id=? WHERE id=?",
+                       (status, attempts, error, retry_at, delivered_at, message_id, job_id))
 
     def refresh_letter(self, job_id: int, outcome: str, subject: str, body: str):
         with self.connection() as db:

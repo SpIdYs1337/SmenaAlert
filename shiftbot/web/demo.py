@@ -48,8 +48,11 @@ class DemoMail:
     def probe(self, _settings, _password):
         pass
 
-    def send(self, *_args, **_kwargs):
-        pass
+    def send(self, *_args, key):
+        return f"<demo-{key}@example.org>"
+
+    def contains(self, _settings, _password, _message_id):
+        return True
 
 
 def demo_now():

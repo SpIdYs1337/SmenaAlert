@@ -14,7 +14,7 @@ from .. import __version__
 from ..config import ConfigError
 from ..iiko import IikoError
 from .mail import MailError
-from .service import Service
+from .service import Service, can_check_receipt
 from .settings import InputError, email_address, flag, iiko_settings, list_ids, number, point_settings, smtp_settings, text
 
 
@@ -151,12 +151,30 @@ def create_app(service: Service, *, admin: str, password: str, secure_cookie=Fal
         job_id = service.queue_test(email_address(data().get("email")))
         return jsonify(id=job_id), 202
 
+    @app.put("/api/imap")
+    def save_imap():
+        service.call(service.save_imap, data())
+        return jsonify(ok=True)
+
+    @app.post("/api/imap/probe")
+    def probe_imap():
+        service.call(service.probe_imap)
+        return jsonify(ok=True)
+
     @app.get("/api/history/<int:job_id>")
     def delivery(job_id):
         job = db.delivery(job_id)
         if not job:
             abort(404)
-        return jsonify({key: value for key, value in job.items() if key not in {"event_key", "revision"}})
+        visible = {key: value for key, value in job.items() if key not in {"event_key", "revision", "message_id"}}
+        return jsonify(**visible, can_check_imap=can_check_receipt(job, db.get_setting("imap", {})))
+
+    @app.post("/api/history/<int:job_id>/imap")
+    def check_receipt(job_id):
+        job = db.delivery(job_id)
+        if not job:
+            abort(404)
+        return jsonify(found=service.call(service.check_receipt, job))
 
     @app.post("/api/history/<int:job_id>/retry")
     def retry(job_id):

@@ -7,7 +7,7 @@ const demo = document.body.dataset.demo === "yes";
 const panelName = document.body.dataset.panelName;
 const labels = {
   overview: "Обзор", points: "Торговые точки", history: "Журнал писем",
-  people: "Получатели", iiko: "Подключение iiko", smtp: "Почта SMTP", monitor: "Авторассылка",
+  people: "Получатели", iiko: "Подключение iiko", smtp: "Почта", monitor: "Авторассылка",
 };
 const statusLabels = {
   on_time: ["Вовремя", "green", "check-circle"], late_open: ["Открыта поздно", "amber", "clock"],
@@ -110,7 +110,7 @@ function route() {
 }
 function render() {
   const pages = {overview: pointsPage, points: pointsPage, people: peoplePage, history: historyPage,
-    iiko: iikoPage, smtp: smtpPage, monitor: monitorPage};
+    iiko: iikoPage, smtp: mailPage, monitor: monitorPage};
   for (const link of document.querySelectorAll(".nav [data-page]")) {
     if (link.dataset.page === ui.page) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
@@ -262,11 +262,11 @@ function healthBadge(configured, health) {
   if (health) return badge("Ошибка связи", "red");
   return badge(configured ? "Сохранено" : "Не настроено");
 }
-function smtpPage() {
-  const {smtp, smtp_health: health} = ui.snapshot;
-  return pageHead(labels.smtp, "Служебный почтовый ящик для отправки оповещений") +
+function mailPage() {
+  const {smtp, smtp_health: health, imap} = ui.snapshot;
+  return pageHead(labels.smtp, "Отправка оповещений и проверка входящих") +
     `<div class="settings-grid">
-      <section class="card"><div class="card-head"><h2>Отправитель</h2>${healthBadge(smtp.host, health)}</div>
+      <section class="card"><div class="card-head"><h2>SMTP · Отправитель</h2>${healthBadge(smtp.host, health)}</div>
         <form id="smtp-form" class="card-body stack" data-form="smtp">
           <div class="error-box" data-error role="alert"></div>
           <div class="field-grid smtp-grid">
@@ -288,17 +288,41 @@ function smtpPage() {
           ${health ? `<div class="${health.ok ? "result-box" : "error-box"}" role="status">${esc(health.message)}</div>` : ""}
         </form>
       </section>
-      <section class="card"><div class="card-head"><h2>Тестовое письмо</h2><span class="point-icon">${icon("send")}</span></div>
-        <form class="card-body stack" data-form="smtp-test">
-          <p class="muted">Отправьте пробное письмо на один адрес и проверьте его в папке «Входящие».</p>
-          <div class="error-box" data-error role="alert"></div>
-          <label>Email получателя<input name="email" type="email" required placeholder="manager@example.org"></label>
-          <div class="row"><button class="button" ${disabled(!smtp.host)}>${icon("send")}Отправить тест</button></div>
-          <p id="test-result" class="result-box" role="status"></p>
-          <a class="text-button" href="#history">Открыть журнал писем →</a>
-        </form>
-      </section>
+      <div class="stack">
+        ${imapCard(imap)}
+        <section class="card"><div class="card-head"><h2>Тестовое письмо</h2><span class="point-icon">${icon("send")}</span></div>
+          <form class="card-body stack" data-form="smtp-test">
+            <div class="error-box" data-error role="alert"></div>
+            <label>Email получателя<input name="email" type="email" required placeholder="manager@example.org" value="${esc(imap.email)}">
+              ${imap.email ? '<span class="hint">Проверка через IMAP доступна для адреса подключённого ящика.</span>' : ""}</label>
+            <div class="row"><button class="button" ${disabled(!smtp.host)}>${icon("send")}Отправить тест</button></div>
+            <div id="test-result" aria-live="polite"></div>
+            <a class="text-button" href="#history">Открыть журнал писем →</a>
+          </form>
+        </section>
+      </div>
     </div>`;
+}
+function imapCard(imap) {
+  return `<section class="card"><div class="card-head"><h2>IMAP · Входящие</h2>${healthBadge(imap.host, imap.health)}</div>
+    <form class="card-body stack" data-form="imap">
+      <div class="error-box" data-error role="alert"></div>
+      <div class="field-grid smtp-grid">
+        <label>IMAP-сервер<input name="host" required placeholder="imap.yandex.ru" value="${esc(imap.host)}" maxlength="253"></label>
+        <label>Порт<input name="port" type="number" min="1" max="65535" required value="${imap.port || 993}"></label>
+        <label class="full">Шифрование<select name="security"><option value="ssl">SSL/TLS</option>
+          <option value="starttls" ${selected(imap.security === "starttls")}>STARTTLS</option></select></label>
+        <label class="full">Адрес ящика<input name="email" type="email" required placeholder="alerts@example.org" value="${esc(imap.email)}"></label>
+        <label class="full">Логин IMAP<input name="login" required autocomplete="username" placeholder="alerts@example.org" value="${esc(imap.login)}"></label>
+        <label class="full">Пароль IMAP<input name="password" type="password" autocomplete="new-password" ${imap.has_password ? "" : "required"}
+          placeholder="${imap.has_password ? "Пароль сохранён" : "Пароль или пароль приложения"}">
+          ${imap.has_password ? '<span class="hint">При смене сервера, порта, шифрования или логина введите пароль заново.</span>' : ""}</label>
+      </div>
+      <div class="row"><button class="button primary">Сохранить IMAP</button>
+        ${button("imap-probe", "Проверить доступ", {icon: "refresh", disabled: !imap.host})}</div>
+      ${imap.health ? `<div class="${imap.health.ok ? "result-box" : "error-box"}" role="status">${esc(imap.health.message)}</div>` : ""}
+    </form>
+  </section>`;
 }
 function monitorPage() {
   const options = ui.snapshot.monitor;
@@ -451,17 +475,25 @@ async function mailForm(id) {
     ${preview ? `<label>Комментарий к письму<textarea name="note" placeholder="Необязательно" maxlength="2000"></textarea></label>
       <div class="row"><h3 class="grow">Предпросмотр</h3>${button("letter-preview", "Обновить текст", {id, icon: "refresh"})}</div>
       <div id="letter-preview" class="letter-preview">${letterPreview(preview)}</div>
-      ${ui.snapshot.smtp.host ? "" : '<p class="notice">Сохраните параметры отправителя в разделе «Почта SMTP».</p>'}` : ""}`,
+      ${ui.snapshot.smtp.host ? "" : '<p class="notice">Сохраните параметры отправителя в разделе «Почта».</p>'}` : ""}`,
   {form: "send", id, submit: recipients.length && ui.snapshot.smtp.host ? "Отправить письмо" : null});
 }
 function letterPreview(job) {
   return `<strong>${esc(job.subject)}</strong>${esc(job.body)}`;
+}
+function receiptCheck(job) {
+  if (!job.can_check_imap) return "";
+  return `<div class="stack" data-imap-receipt>
+    <div class="row">${button("imap-receipt", "Найти во входящих", {id: job.id, icon: "search"})}</div>
+    <p class="result-box" data-receipt-result role="status"></p>
+  </div>`;
 }
 async function openLetter(id) {
   const job = await api(`/history/${id}`);
   drawerView(job.point_name || "Тестовое письмо", job.recipient, `<div class="row">${badge(...mailStates[job.status])}
       <span class="muted">${mailKinds[job.kind]} · ${dateTime(job.created_at)} МСК</span></div>
     ${job.error ? `<p class="error-box">${esc(job.error)}</p>` : ""}
+    ${receiptCheck(job)}
     <div class="letter-preview">${letterPreview(job)}</div>`,
   {extra: job.status === "failed" ? button("retry-letter", "Повторить отправку", {id, icon: "refresh"}) : ""});
 }
@@ -495,19 +527,19 @@ async function trackTest(id, container) {
     try {
       const job = await api(`/history/${id}`);
       if (job.status === "sent") {
-        container.textContent = demo ? "Тест на демонстрационных данных завершён." : "Письмо принято SMTP. Проверьте входящие.";
+        const message = demo ? "Тест на демонстрационных данных завершён." : "Письмо принято SMTP.";
+        container.innerHTML = `<p class="result-box">${message}</p>${receiptCheck(job)}`;
         return;
       }
       if (job.status === "failed") {
-        container.className = "error-box";
-        container.textContent = job.error || "SMTP отклонил письмо.";
+        container.innerHTML = `<p class="error-box">${esc(job.error || "SMTP отклонил письмо.")}</p>`;
         return;
       }
     } catch {
       return;
     }
   }
-  if (container.isConnected) container.textContent = "Письмо в очереди. Статус доступен в журнале.";
+  if (container.isConnected) container.innerHTML = '<p class="notice">Письмо в очереди. Статус доступен в журнале.</p>';
 }
 async function handleForm(form) {
   const values = new FormData(form);
@@ -525,11 +557,17 @@ async function handleForm(form) {
       await refresh();
       toast("Настройки SMTP сохранены.");
       return;
+    case "imap":
+      await api("/imap", "PUT", {...Object.fromEntries(values), port: Number(values.get("port"))});
+      await refresh();
+      toast("Настройки IMAP сохранены.");
+      return;
     case "smtp-test": {
       const job = await api("/smtp/test", "POST", {email: values.get("email")});
-      const result = form.querySelector("#test-result");
-      result.className = "result-box";
-      result.textContent = "Тестовое письмо в очереди.";
+      const result = document.createElement("div");
+      result.className = "stack";
+      result.innerHTML = '<p class="notice">Тестовое письмо в очереди.</p>';
+      form.querySelector("#test-result").replaceChildren(result);
       trackTest(job.id, result);
       return;
     }
@@ -605,6 +643,28 @@ const actions = {
       toast("Соединение с SMTP установлено.");
     } finally {
       await refresh();
+    }
+  },
+  "imap-probe": async () => {
+    try {
+      await api("/imap/probe", "POST");
+      toast("Входящие доступны по IMAP.");
+    } finally {
+      await refresh();
+    }
+  },
+  "imap-receipt": async (id, node) => {
+    const result = node.closest("[data-imap-receipt]").querySelector("[data-receipt-result]");
+    result.className = "notice";
+    result.textContent = "Ищем письмо во входящих…";
+    try {
+      const {found} = await api(`/history/${id}/imap`, "POST");
+      result.className = found ? "result-box" : "notice";
+      const received = demo ? "Симуляция получения письма." : "Письмо найдено во входящих.";
+      result.textContent = found ? received : "Письмо пока не найдено. Повторите проверку чуть позже.";
+    } catch (error) {
+      result.className = "error-box";
+      result.textContent = error.message;
     }
   },
   "letter-preview": async (id, node) => {
@@ -692,9 +752,12 @@ document.addEventListener("change", event => {
     node.closest("form").elements.department_id.value = node.value;
   } else if (node.name === "server" && node.closest("[data-form=point]")) {
     node.closest("form").querySelector("#departments").replaceChildren();
-  } else if (node.name === "security" && node.closest("[data-form=smtp]")) {
-    const port = node.closest("form").elements.port;
-    if (["465", "587"].includes(port.value)) port.value = node.value === "ssl" ? "465" : "587";
+  } else if (node.name === "security") {
+    const form = node.closest("form");
+    const ports = {smtp: {ssl: "465", starttls: "587"}, imap: {ssl: "993", starttls: "143"}}[form?.dataset.form];
+    if (ports && [ports.ssl, ports.starttls].includes(form.elements.port.value)) {
+      form.elements.port.value = ports[node.value];
+    }
   }
 });
 document.querySelector("#mobile-nav").addEventListener("click", event => {
