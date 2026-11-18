@@ -1,0 +1,63 @@
+# Все контрольные даты и времена — Europe/Moscow.
+# Это примеры. Замените адреса и ID своими значениями.
+
+[bot]
+token_env = "YANDEX_MESSENGER_BOT_TOKEN"
+chat_id = "0/0/11111111-1111-4111-8111-111111111111"
+admin_logins = ["manager@example.org"]
+# thread_id = 1702325004369005 # Необязательно: ID сообщения, под которым открыт тред.
+notify_responsibles_privately = false # Личная копия первой тревоги по логинам.
+state_path = "data/state.sqlite3"
+poll_interval_seconds = 30
+repeat_after_minutes = 0 # 0: одно первичное уведомление на точку в сутки.
+api_error_after_minutes = 3
+notification_delay_seconds = 0 # Задержать уведомление; исходное время открытия не меняется.
+at_deadline_is_on_time = false # false: требуется открыться СТРОГО РАНЬШЕ времени из графика.
+
+[servers.main]
+base_url = "https://your-company.iiko.it/resto"
+login_env = "IIKO_MAIN_LOGIN"
+password_env = "IIKO_MAIN_PASSWORD"
+timezone = "Europe/Moscow" # Часовой пояс времени без offset в ответах ЭТОГО сервера iiko.
+
+# Если у части точек другой iikoServer, добавьте servers.second и соответствующие env.
+# UUID предприятий/групп можно получить через --discover main.
+
+[[outlets]]
+id = "arbat"
+name = "Арбат"
+server = "main"
+department_id = "11111111-1111-4111-8111-111111111111"
+# group_id = "33333333-3333-4333-8333-333333333333"
+cash_register_numbers = [] # []: любая касса выбранного предприятия/группы.
+require_all_registers = false
+
+[outlets.week]
+mon = "09:00"
+tue = "09:00"
+wed = "09:00"
+thu = "09:00"
+fri = "09:00"
+sat = "10:00"
+sun = "10:00"
+
+[outlets.exceptions]
+"2027-01-01" = "off"
+"2027-01-02" = "11:00"
+
+[[outlets]]
+id = "tverskaya"
+name = "Тверская"
+server = "main"
+department_id = "22222222-2222-4222-8222-222222222222"
+cash_register_numbers = []
+require_all_registers = false
+
+[outlets.week]
+mon = "08:30"
+tue = "08:30"
+wed = "08:30"
+thu = "08:30"
+fri = "08:30"
+sat = "09:00"
+sun = "off"

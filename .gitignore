@@ -1,0 +1,7 @@
+.env
+.env.web
+config.toml
+data/
+__pycache__/
+*.py[cod]
+.venv/

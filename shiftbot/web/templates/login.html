@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Вход · Контроль открытия</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='panel.css') }}">
+</head>
+<body class="login-screen">
+  <main class="login-panel">
+    <div class="brand login-brand"><span class="brand-mark"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 21h16M7 21V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v16M13.5 12h.01"/></svg></span>
+      <span><strong>Контроль открытия</strong><small>Кассовые смены iiko</small></span></div>
+    <h1>Вход в панель</h1>
+    <form class="stack" method="post">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      {% if error %}<p class="error-box" role="alert">{{ error }}</p>{% endif %}
+      <label>Логин<input name="login" autocomplete="username" required autofocus></label>
+      <label>Пароль<input name="password" type="password" autocomplete="current-password" required></label>
+      <button class="button primary">Войти</button>
+    </form>
+  </main>
+</body>
+</html>
