@@ -7,7 +7,7 @@ services:
     init: true
     env_file: .env.web
     ports:
-      - "${PANEL_BIND:-127.0.0.1}:${PANEL_PORT:-8080}:8080"
+      - "${PANEL_BIND:-0.0.0.0}:${PANEL_PORT:-8080}:8080"
     volumes:
       - panel_data:/app/data
     read_only: true
