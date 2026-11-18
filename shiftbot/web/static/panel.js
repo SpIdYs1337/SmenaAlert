@@ -4,13 +4,15 @@ const content = document.querySelector("#content");
 const drawer = document.querySelector("#drawer");
 const csrf = document.querySelector("[name=csrf]").content;
 const demo = document.body.dataset.demo === "yes";
+const panelName = document.body.dataset.panelName;
 const labels = {
   overview: "Обзор", points: "Торговые точки", history: "Журнал писем",
   people: "Получатели", iiko: "Подключение iiko", smtp: "Почта SMTP", monitor: "Авторассылка",
 };
 const statusLabels = {
-  on_time: ["Вовремя", "green"], late_open: ["Опоздала", "amber"], not_open: ["Не открыта", "amber"],
-  waiting: ["Ожидает открытия", ""], unknown: ["Не проверена", ""], api_error: ["Ошибка iiko", "red"],
+  on_time: ["Вовремя", "green", "check-circle"], late_open: ["Открыта поздно", "amber", "clock"],
+  not_open: ["Не открыта", "red", "alert"], waiting: ["Ожидает", "", "clock"],
+  unknown: ["Не проверена", ""], api_error: ["Ошибка iiko", "blue", "alert"],
   day_off: ["Выходной", ""], paused: ["На паузе", ""],
 };
 const mailStates = {
@@ -18,6 +20,7 @@ const mailStates = {
   failed: ["Ошибка", "red"], cancelled: ["Отменено", ""],
 };
 const mailKinds = {auto: "Опоздание", followup: "Уточнение", manual: "Вручную", test: "Тест"};
+const pointPriority = ["not_open", "api_error", "late_open", "waiting", "unknown", "on_time", "day_off", "paused"];
 const days = {mon: "Понедельник", tue: "Вторник", wed: "Среда", thu: "Четверг", fri: "Пятница", sat: "Суббота", sun: "Воскресенье"};
 const ui = {page: "overview", snapshot: null, query: "", filter: "all"};
 const timeFormat = new Intl.DateTimeFormat("ru-RU", {timeZone: "Europe/Moscow", hour: "2-digit", minute: "2-digit"});
@@ -36,8 +39,8 @@ function dateTime(value) { return value ? dateTimeFormat.format(new Date(value))
 function checked(value) { return value ? "checked" : ""; }
 function selected(value) { return value ? "selected" : ""; }
 function disabled(value) { return value ? "disabled" : ""; }
-function badge(title, tone = "") {
-  return `<span class="status-badge ${tone}"><span class="dot"></span>${esc(title)}</span>`;
+function badge(title, tone = "", mark) {
+  return `<span class="status-badge ${tone}">${mark ? icon(mark) : '<span class="dot"></span>'}${esc(title)}</span>`;
 }
 function button(action, label, options = {}) {
   const {icon: mark, kind = "", id, disabled: inactive = false} = options;
@@ -117,13 +120,12 @@ function render() {
   const active = ui.snapshot.monitor.enabled;
   mode.classList.toggle("on", active);
   mode.innerHTML = `<span class="dot"></span>Авторассылка ${active ? "включена" : "на паузе"}`;
-  document.title = `${labels[ui.page]} · Контроль открытия`;
+  document.title = `${labels[ui.page]} · ${panelName}`;
   content.innerHTML = pages[ui.page]();
 }
-function metric(key, label, count, mark, tone = "") {
-  return `<button class="metric" type="button" data-action="filter" data-id="${key}" aria-pressed="${ui.filter === key}">
-    <span class="metric-label">${label}</span><span class="metric-number">${count}</span>
-    <span class="metric-icon ${tone}">${icon(mark)}</span></button>`;
+function metric(key, label, count, tone = "") {
+  return `<button class="metric ${tone}" type="button" data-action="filter" data-id="${key}" aria-pressed="${ui.filter === key}">
+    ${esc(label)}<span class="tabular">${count}</span></button>`;
 }
 function search(placeholder) {
   return `<label class="search">${icon("search")}<input type="search" aria-label="${esc(placeholder)}"
@@ -142,28 +144,30 @@ function isWaiting(point) { return ["waiting", "unknown"].includes(point.today.s
 function pointsPage() {
   const {points, now} = ui.snapshot;
   const overview = ui.page === "overview";
-  const subtitle = overview ? `${icon("calendar")}Сегодня, ${dateFormat.format(new Date(now))} · МСК` :
+  const subtitle = overview ? `${icon("calendar")}${dateFormat.format(new Date(now))} · МСК` :
     "Графики открытия и ответственные за каждую точку";
   if (!points.length) {
     return pageHead(overview ? "Открытие точек" : labels.points, subtitle, button("point-new", "Добавить точку", {icon: "plus", kind: "primary"})) +
       `<section class="card">${empty("store", "Вы ещё не добавили точки", "Подключите iiko и задайте график первой точки.",
         `<a href="#iiko" class="button">${icon("link")}Настроить iiko</a>`)}</section>`;
   }
-  const filters = [["all", "Все статусы"], ["on_time", "Вовремя"], ["late", "Опаздывают"], ["waiting", "Ожидают"],
-    ["api_error", "Ошибка iiko"], ["day_off", "Выходной"], ["paused", "На паузе"]];
-  const scores = overview ? `<div class="metrics" aria-label="Сводка за сегодня">
-    ${metric("all", "Точек в сети", points.length, "store")}
-    ${metric("on_time", "Открылись вовремя", points.filter(point => point.today.status === "on_time").length, "check-circle", "green")}
-    ${metric("late", "Опаздывают", points.filter(isLate).length, "alert", "amber")}
-    ${metric("waiting", "Ожидают открытия", points.filter(isWaiting).length, "clock")}
+  const filters = [["all", "Все статусы"], ["on_time", statusLabels.on_time[0]], ["late", "Все опоздания"],
+    ["not_open", statusLabels.not_open[0]], ["late_open", statusLabels.late_open[0]], ["waiting", "Ожидают"],
+    ["api_error", statusLabels.api_error[0]], ["day_off", "Выходной"], ["paused", "На паузе"]];
+  const scores = overview ? `<div class="metrics" role="group" aria-label="Фильтры смен">
+    ${metric("all", "Все точки", points.length)}
+    ${["not_open", "late_open", "api_error"].map(status => {
+      const [label, tone] = statusLabels[status];
+      return metric(status, label, points.filter(point => point.today.status === status).length, tone);
+    }).join("")}
   </div>` : "";
   const latest = points.map(point => point.today.checked_at).filter(Boolean).sort().at(-1);
   return pageHead(overview ? "Открытие точек" : labels.points, subtitle,
     button("check-all", "Проверить сейчас", {icon: "refresh"}) + button("point-new", "Добавить точку", {icon: "plus", kind: "primary"})) +
     scores + `<section class="card">
     <div class="card-head"><div class="card-headline"><h2>Точки сети</h2><span class="count">${points.length}</span></div>
-      <div class="table-controls">${search("Поиск точки")}${selectFilter(filters)}</div></div>
-    <div class="table-wrap"><table aria-label="Точки сети"><thead><tr>
+      <div class="table-controls">${search("Поиск точки")}${overview ? "" : selectFilter(filters)}</div></div>
+    <div class="table-wrap"><table class="point-table" aria-label="Точки сети"><thead><tr>
       <th scope="col">Точка</th><th scope="col">По графику</th><th scope="col">Открыта</th><th scope="col">Статус</th>
       <th scope="col">Ответственные</th><th scope="col"><span class="sr-only">Действия</span></th>
     </tr></thead><tbody id="table-rows">${pointRows()}</tbody></table></div>
@@ -173,21 +177,26 @@ function pointsPage() {
 }
 function pointRows() {
   const people = new Map(ui.snapshot.people.map(person => [person.id, person]));
-  return ui.snapshot.points.filter(point => {
+  const points = ui.snapshot.points.filter(point => {
     const status = point.today.status;
     const matches = ui.filter === "all" || ui.filter === status || ui.filter === "late" && isLate(point) ||
       ui.filter === "waiting" && isWaiting(point);
     return matches && includesQuery(point.name, ...point.people.map(id => people.get(id)?.name));
-  }).map(point => {
+  });
+  if (ui.page === "overview") {
+    points.sort((left, right) => pointPriority.indexOf(left.today.status) - pointPriority.indexOf(right.today.status));
+  }
+  return points.map(point => {
     const state = point.today;
     const assigned = point.people.map(id => people.get(id)).filter(person => person?.active);
     return `<tr data-action="point-edit" data-id="${point.id}">
       <td><button class="point-button" type="button" data-action="point-edit" data-id="${point.id}">
         <span class="point-icon">${icon("store")}</span>${esc(point.name)}</button></td>
-      <td class="tabular">${time(state.deadline)}</td><td class="tabular ${!state.opened_at ? "muted" : ""}">${time(state.opened_at)}</td>
-      <td>${badge(...(statusLabels[state.status] || statusLabels.unknown))}</td>
-      <td class="people-cell">${assigned.length ? esc(assigned.map(person => person.name).join(", ")) : "Не назначены"}</td>
-      <td><div class="table-end">${iconButton("point-mail", "Отправить письмо", "mail", point.id)}
+      <td class="tabular" data-label="По графику">${time(state.deadline)}</td>
+      <td class="tabular ${!state.opened_at ? "muted" : ""}" data-label="Открыта">${time(state.opened_at)}</td>
+      <td data-label="Статус">${badge(...(statusLabels[state.status] || statusLabels.unknown))}</td>
+      <td class="people-cell" data-label="Ответственные">${assigned.length ? esc(assigned.map(person => person.name).join(", ")) : "Не назначены"}</td>
+      <td><div class="table-end">${iconButton("point-mail", "Предпросмотр письма", "mail", point.id)}
         ${iconButton("point-edit", "Редактировать точку", "right", point.id)}</div></td>
     </tr>`;
   }).join("") || `<tr><td colspan="6" class="empty-cell">${empty("search", "Точки не найдены", "Измените поиск или фильтр.")}</td></tr>`;
@@ -375,18 +384,21 @@ function weekRows(week) {
 }
 function exceptionRow(day = "", value = "09:00") {
   const off = value === "off";
-  return `<div class="exception-row"><input type="date" aria-label="Дата исключения" required value="${esc(day)}">
-    <input type="time" aria-label="Время открытия в исключение" value="${off ? "09:00" : esc(value)}" required ${disabled(off)}>
+  return `<div class="exception-row"><input type="date" aria-label="Дата разового изменения" required value="${esc(day)}">
+    <input type="time" aria-label="Время открытия на выбранную дату" value="${off ? "09:00" : esc(value)}" required ${disabled(off)}>
     <label class="check"><input type="checkbox" data-disable-time ${checked(off)}>Выходной</label>
-    ${iconButton("exception-remove", "Убрать исключение", "close", "")}</div>`;
+    ${iconButton("exception-remove", "Удалить разовое изменение", "close", "")}</div>`;
 }
 function pointStatus(point) {
   const current = point.today;
   if (!current) return "";
-  return `<div class="row">
-    ${badge(...statusLabels[current.status])}${current.opened_at ? `<span class="muted">Открыта в ${time(current.opened_at)} МСК</span>` : ""}
-    <span class="spacer"></span>${button("check-point", "Проверить", {id: point.id, icon: "refresh"})}
-    ${button("point-mail", "Письмо", {id: point.id, icon: "mail"})}</div>
+  return `<dl class="point-facts" aria-label="Открытие сегодня по московскому времени">
+    <div><dt>Статус</dt><dd>${badge(...(statusLabels[current.status] || statusLabels.unknown))}</dd></div>
+    <div><dt>По графику · МСК</dt><dd class="tabular">${time(current.deadline)}</dd></div>
+    <div><dt>Открыта · МСК</dt><dd class="tabular">${time(current.opened_at)}</dd></div>
+  </dl>
+    <div class="row">${button("check-point", "Проверить", {id: point.id, icon: "refresh"})}
+    ${button("point-mail", "Предпросмотр письма", {id: point.id, icon: "mail"})}</div>
     ${current.error ? `<p class="error-box">${esc(current.error)}</p>` : ""}`;
 }
 function pointForm(id) {
@@ -397,30 +409,35 @@ function pointForm(id) {
       button("go-iiko", "Настроить iiko", {kind: "primary", icon: "link"})));
     return;
   }
-  drawerView(id ? point.name : "Новая торговая точка", id ? "График и получатели оповещений" : "Выберите предприятие и задайте график", `
-    ${id ? `<div class="stack" data-point-state>${pointStatus(point)}</div>` : ""}
-    <section class="form-section"><div class="field-grid">
-      <label class="full">Название точки<input name="name" value="${esc(point.name)}" required maxlength="120" placeholder="Арбат"></label>
+  const connectionFields = `<div class="form-section"><div class="field-grid">
       <label class="full">Подключение iiko<select name="server" required>
         ${ui.snapshot.servers.map(server => `<option value="${server.id}" ${selected(point.server === server.id)}>${esc(server.name)}</option>`).join("")}
       </select></label>
       <label class="full">UUID предприятия<input name="department_id" value="${esc(point.department_id)}" required maxlength="36"
         placeholder="00000000-0000-0000-0000-000000000000" spellcheck="false"></label>
     </div>
-    <div class="row">${button("departments", "Выбрать из iiko", {icon: "store"})}
-      <label class="check"><input name="active" type="checkbox" ${checked(point.active !== false)}>Проверять эту точку</label></div>
+    <div class="row">${button("departments", "Выбрать из iiko", {icon: "store"})}</div>
     <div id="departments"></div>
     <details><summary>Фильтр по кассам и группе</summary><div class="field-grid">
       <label class="full">UUID группы касс<input name="group_id" maxlength="36" value="${esc(point.group_id)}" placeholder="Необязательно"></label>
       <label class="full">Номера касс<input name="registers" value="${esc(point.registers?.join(", "))}" placeholder="Например, 1, 2"></label>
       <label class="check full"><input name="require_all_registers" type="checkbox" ${checked(point.require_all_registers)}>Дождаться всех выбранных касс</label>
-    </div></details></section>
-    <section class="form-section"><h3>График открытия · МСК</h3><div class="schedule">${weekRows(point.week)}</div></section>
-    <section class="form-section"><div class="row"><h3 class="grow">Исключения по датам</h3>${button("exception-add", "Добавить дату", {icon: "plus"})}</div>
+    </div></details></div>`;
+  drawerView(id ? point.name : "Новая торговая точка", id ? "График и получатели оповещений" : "Выберите предприятие и задайте график", `
+    ${id ? `<div class="stack point-status" data-point-state>${pointStatus(point)}</div>` : ""}
+    <section class="form-section">
+      <label>Название точки<input name="name" value="${esc(point.name)}" required maxlength="120" placeholder="Арбат"></label>
+      <label class="check"><input name="active" type="checkbox" ${checked(point.active !== false)}>Проверять эту точку</label>
+      ${id ? "" : connectionFields}
+    </section>
+    <section class="form-section"><h3>Обычная неделя · МСК</h3><div class="schedule">${weekRows(point.week)}</div></section>
+    <section class="form-section"><div class="row"><h3 class="grow">Разовое изменение</h3>${button("exception-add", "Добавить дату", {icon: "plus"})}</div>
+      <p class="hint">Укажите другое время открытия по МСК или выходной на выбранную дату.</p>
       <div class="exception-list" id="exceptions">${Object.entries(point.exceptions || {}).sort().map(([day, value]) => exceptionRow(day, value)).join("")}</div></section>
-    <section class="form-section"><h3>Ответственные</h3>
+    <section class="form-section"><h3>Получатели</h3>
       ${checklist(ui.snapshot.people, "person", point.people || [], "Добавьте email в разделе «Получатели».",
-        person => person.active ? person.email : `${person.email} · На паузе`)}</section>`,
+        person => person.active ? person.email : `${person.email} · На паузе`)}</section>
+    ${id ? `<details class="point-connection"><summary>Подключение iiko и кассы</summary>${connectionFields}</details>` : ""}`,
   {form: "point", id, submit: "Сохранить", extra: removeButton("points", id)});
 }
 async function mailForm(id) {
@@ -687,6 +704,10 @@ document.querySelector("#mobile-nav").addEventListener("click", event => {
 drawer.addEventListener("cancel", event => {
   if (drawer.querySelector(".drawer-form")?.dataset.busy) event.preventDefault();
 });
+drawer.addEventListener("invalid", event => {
+  const details = event.target.closest("details");
+  if (details) details.open = true;
+}, true);
 window.addEventListener("hashchange", route);
 route();
 refresh().catch(error => {

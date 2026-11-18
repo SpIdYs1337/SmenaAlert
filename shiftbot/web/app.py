@@ -10,6 +10,7 @@ from time import monotonic
 from flask import Flask, abort, jsonify, redirect, render_template, request, session, url_for
 from werkzeug.exceptions import HTTPException
 
+from .. import __version__
 from ..config import ConfigError
 from ..iiko import IikoError
 from .mail import MailError
@@ -23,6 +24,7 @@ def same(left: str, right: str) -> bool:
 
 def create_app(service: Service, *, admin: str, password: str, secure_cookie=False, demo=False) -> Flask:
     app = Flask(__name__)
+    app.jinja_env.globals.update(panel_name="iiko-Контроль смены", panel_version=__version__)
     app.secret_key = service.vault.session_key(admin, password)
     app.config.update(SESSION_COOKIE_NAME="shift_monitor", SESSION_COOKIE_HTTPONLY=True,
                       SESSION_COOKIE_SAMESITE="Strict", SESSION_COOKIE_SECURE=secure_cookie,

@@ -107,6 +107,42 @@ class WebPanelTests(unittest.TestCase):
         self.assertIn("09:07:00", self.smtp.messages[1][2])
         self.assertEqual({item["kind"] for item in self.db.history()}, {"auto", "followup"})
 
+    def test_date_changes_are_per_point_and_never_alert_before_opening_time(self):
+        server = self.configure()
+        person = self.add_person("Анна", "anna@example.org")
+        later = self.point(server, "Арбат", [person], 1)
+        closed = self.point(server, "Сокол", [person], 2)
+        today = self.current.date().isoformat()
+        edited = self.db.get("points", later)
+        edited["week"]["wed"] = "off"
+        self.write("PUT", f"/points/{later}", {**edited, "people": [person], "exceptions": {today: "10:00"}})
+        self.write("PUT", f"/points/{closed}", {
+            **self.db.get("points", closed), "people": [person], "exceptions": {today: "off"},
+        })
+        self.write("PUT", "/monitor", {"enabled": True})
+
+        self.current = self.current.replace(minute=59, second=59)
+        asyncio.run(self.service.check())
+        asyncio.run(self.service.deliver())
+        self.assertEqual(self.db.history(), [])
+        self.assertEqual(self.smtp.messages, [])
+        states = {point["id"]: point["today"]["status"] for point in self.service.views()}
+        self.assertEqual(states, {later: "waiting", closed: "day_off"})
+
+        self.current = self.current.replace(hour=10, minute=0, second=0)
+        asyncio.run(self.service.check())
+        asyncio.run(self.service.deliver())
+        self.assertEqual(len(self.smtp.messages), 1)
+        self.assertIn("Арбат", self.smtp.messages[0][1])
+        self.assertEqual(self.db.checks(today)[later]["status"], "not_open")
+
+        self.current = self.current.replace(day=19, hour=8)
+        for point in self.service.views():
+            self.assertEqual(datetime.fromisoformat(point["today"]["deadline"]).hour, 9)
+        self.current = self.current.replace(day=25)
+        states = {point["id"]: point["today"]["status"] for point in self.service.views()}
+        self.assertEqual(states, {later: "day_off", closed: "waiting"})
+
     def test_ui_config_and_manual_outbox_use_only_authorized_assignments(self):
         server = self.configure()
         person = self.add_person("Анна", "anna@example.org")

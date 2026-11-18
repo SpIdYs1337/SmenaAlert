@@ -4,13 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="csrf" content="{{ csrf }}">
-  <title>Контроль открытия</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='panel.css') }}">
-  <script src="{{ url_for('static', filename='panel.js') }}" defer></script>
+  <title>{{ panel_name }}</title>
+  <link rel="icon" type="image/png" href="{{ url_for('static', filename='shift-mark.png', v=panel_version) }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='panel.css', v=panel_version) }}">
+  <script src="{{ url_for('static', filename='panel.js', v=panel_version) }}" defer></script>
 </head>
-<body data-demo="{{ 'yes' if demo else 'no' }}">
+<body data-demo="{{ 'yes' if demo else 'no' }}" data-panel-name="{{ panel_name }}">
   <svg class="sprite" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
-    <symbol id="i-door" viewBox="0 0 24 24"><path d="M4 21h16M7 21V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v16M13.5 12h.01"/></symbol>
     <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></symbol>
     <symbol id="i-store" viewBox="0 0 24 24"><path d="M3 9l2-5h14l2 5M3 9v2a2 2 0 0 0 4.5 0 2 2 0 0 0 4.5 0 2 2 0 0 0 4.5 0 2 2 0 0 0 4.5 0V9H3Zm2 4v7h14v-7M10 20v-5h4v5"/></symbol>
     <symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2m20 0v-2a4 4 0 0 0-3-3.9M16 3a4 4 0 0 1 0 8"/><circle cx="9" cy="7" r="4"/></symbol>
@@ -38,9 +38,8 @@
 
   <div class="shell">
     <aside class="sidebar" id="sidebar">
-      <a class="brand" href="#overview" aria-label="Контроль открытия — обзор">
-        <span class="brand-mark"><svg class="icon"><use href="#i-door"></use></svg></span>
-        <span><strong>Контроль открытия</strong><small>Кассовые смены iiko</small></span>
+      <a class="brand" href="#overview">
+        {% include '_brand.html' %}
       </a>
       <nav class="nav" aria-label="Разделы панели">
         <span class="nav-label">Мониторинг</span>
@@ -67,7 +66,7 @@
     <div class="workspace">
       <header class="topbar">
         <div class="breadcrumb">
-          <button id="mobile-nav" class="icon-button mobile-nav" type="button" aria-label="Открыть меню" aria-expanded="false"><svg class="icon"><use href="#i-menu"></use></svg></button>
+          <button id="mobile-nav" class="button mobile-nav" type="button" aria-controls="sidebar" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-menu"></use></svg>Разделы</button>
           <span id="crumb">Обзор</span>
         </div>
         <div class="top-end">
