@@ -5,6 +5,7 @@ import json
 import tempfile
 import threading
 import unittest
+from hashlib import sha1
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from datetime import datetime, timezone
@@ -29,9 +30,10 @@ class HttpIntegrationTests(unittest.IsolatedAsyncioTestCase):
             def log_message(self, *args):
                 pass
 
-            def respond(self, body):
+            def respond(self, body, content_type="application/json"):
                 raw = body.encode("utf-8")
                 self.send_response(200)
+                self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(raw)))
                 self.end_headers()
                 self.wfile.write(raw)
@@ -45,8 +47,18 @@ class HttpIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         return
                     queries.append(query)
                     self.respond(json.dumps(data["shifts"]))
+                elif request.path == "/resto/api/corporation/departments":
+                    if not self.headers.get("Accept", "").startswith("application/xml"):
+                        self.send_error(406)
+                        return
+                    self.respond("<list><department><id>north</id><name>Север</name></department></list>",
+                                 "application/xml")
                 elif request.path.endswith("/logout"):
-                    self.respond("true")
+                    if not self.headers.get("Accept", "").startswith("text/plain"):
+                        self.send_error(406)
+                        return
+                    data["logged_out"] = True
+                    self.respond("true", "text/plain")
                 elif request.path == "/bot/v1/messages/getUpdates/":
                     if self.headers.get("Authorization") != "OAuth fixture-token":
                         self.send_error(401)
@@ -58,7 +70,17 @@ class HttpIntegrationTests(unittest.IsolatedAsyncioTestCase):
             def do_POST(self):
                 request = urlsplit(self.path)
                 if request.path == "/resto/api/auth":
-                    self.respond("a" * 32)
+                    if not self.headers.get("Accept", "").startswith("text/plain"):
+                        self.send_error(406)
+                        return
+                    if self.headers.get_content_type() != "application/x-www-form-urlencoded" or request.query:
+                        self.send_error(400)
+                        return
+                    form = parse_qs(self.rfile.read(int(self.headers["Content-Length"])).decode("ascii"))
+                    if form != {"login": ["fixture"], "pass": [sha1(b"fixture").hexdigest()]}:
+                        self.send_error(401)
+                        return
+                    self.respond("a" * 32, "text/plain")
                 elif request.path == "/bot/v1/messages/sendText/":
                     if self.headers.get("Authorization") != "OAuth fixture-token":
                         self.send_error(401)
@@ -78,6 +100,10 @@ class HttpIntegrationTests(unittest.IsolatedAsyncioTestCase):
         messenger._base = base + "/bot/v1/"
         try:
             with patch.dict("os.environ", {"LOGIN": "fixture", "PASSWORD": "fixture"}):
+                departments = await client.discover("departments")
+                self.assertEqual(departments, [{
+                    "id": "north", "name": "Север", "parentId": None, "departmentId": None,
+                }])
                 with tempfile.TemporaryDirectory() as folder:
                     path = str(Path(folder) / "state.sqlite3")
                     store = Store(path)
@@ -102,6 +128,7 @@ class HttpIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     finally:
                         store.close()
                 await client.close()
+            self.assertTrue(data.get("logged_out"))
             self.assertEqual(len(sent), 3)  # Assignment acknowledgement, initial alert, resolution.
             self.assertEqual(sent[1]["chat_id"], CHAT_ID)
             self.assertIn("Анна (anna@example.org)", sent[1]["text"])

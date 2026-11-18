@@ -35,17 +35,21 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class Http:
-    async def request(self, method: str, url: str, *, params=None, payload=None, headers=None,
+    async def request(self, method: str, url: str, *, params=None, payload=None, form=None, headers=None,
                       timeout: int = 20) -> Response:
-        return await asyncio.to_thread(self._request, method, url, params, payload, headers, timeout)
+        return await asyncio.to_thread(self._request, method, url, params, payload, form, headers, timeout)
 
     @staticmethod
-    def _request(method: str, url: str, params, payload, headers, timeout: int) -> Response:
+    def _request(method: str, url: str, params, payload, form, headers, timeout: int) -> Response:
         if params:
             url += "?" + urllib.parse.urlencode(params, doseq=True)
-        data = json.dumps(payload, ensure_ascii=False).encode() if payload is not None else None
         request_headers = {"Accept": "application/json", "User-Agent": "iiko-shift-monitor/2.0", **(headers or {})}
-        if data is not None:
+        data = None
+        if form is not None:
+            data = urllib.parse.urlencode(form, doseq=True).encode("ascii")
+            request_headers["Content-Type"] = "application/x-www-form-urlencoded"
+        elif payload is not None:
+            data = json.dumps(payload, ensure_ascii=False).encode()
             request_headers["Content-Type"] = "application/json"
         req = urllib.request.Request(url, data=data, headers=request_headers, method=method)
         opener = urllib.request.build_opener(NoRedirect())

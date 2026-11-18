@@ -14,6 +14,9 @@ from .domain import Shift, moscow_day_bounds
 from .http import Http, NetworkError
 
 
+_AUTH_HEADERS = {"Accept": "text/plain, application/json;q=0.9"}
+
+
 class IikoError(Exception):
     pass
 
@@ -63,14 +66,14 @@ class Iiko:
         login, password = self.server.credentials()
         password_hash = hashlib.sha1(password.encode("utf-8")).hexdigest()
         url = self.server.base_url + "/api/auth"
-        params = {"login": login, "pass": password_hash}
+        credentials = {"login": login, "pass": password_hash}
         try:
-            response = await self.http.request("POST", url, params=params)
+            response = await self.http.request("POST", url, form=credentials, headers=_AUTH_HEADERS)
         except NetworkError as error:
             if error.status != 405:
                 raise
             # Compatibility for installations which only offer GET /auth.
-            response = await self.http.request("GET", url, params=params)
+            response = await self.http.request("GET", url, params=credentials, headers=_AUTH_HEADERS)
         key = response.body.strip()
         if key.startswith('"'):
             try:
@@ -81,7 +84,7 @@ class Iiko:
             raise IikoError("Неверный ответ авторизации")
         self.key = key
 
-    async def _get(self, path: str, params=None):
+    async def _get(self, path: str, params=None, *, accept: str = "application/json"):
         async with self._lock:
             loop = asyncio.get_running_loop()
             if loop.time() < self._blocked_until:
@@ -92,8 +95,10 @@ class Iiko:
                     if not self.key:
                         await self._login()
                     authorized = True
-                    return await self.http.request("GET", self.server.base_url + path,
-                                                   params={**(params or {}), "key": self.key})
+                    return await self.http.request(
+                        "GET", self.server.base_url + path,
+                        params={**(params or {}), "key": self.key}, headers={"Accept": accept},
+                    )
                 except NetworkError as error:
                     if error.status == 401 and authorized:
                         self.key = None
@@ -101,7 +106,8 @@ class Iiko:
                             continue
                     if error.status in (0, 401, 429) or error.status >= 500:
                         self._blocked_until = loop.time() + max(error.retry_after, 30)
-                    raise IikoError(f"iiko: {error}") from None
+                    message = f"Ошибка запроса iiko {path}" if authorized else "Ошибка авторизации iiko"
+                    raise IikoError(f"{message} ({error})") from None
                 except IikoError:
                     self._blocked_until = loop.time() + 30
                     raise
@@ -130,7 +136,7 @@ class Iiko:
     async def discover(self, kind: str) -> list[dict]:
         if kind not in ("departments", "groups"):
             raise ValueError("Unknown kind")
-        response = await self._get(f"/api/corporation/{kind}")
+        response = await self._get(f"/api/corporation/{kind}", accept="application/xml, text/xml;q=0.9")
         try:
             root = ET.fromstring(response.body)
         except ET.ParseError:
@@ -147,6 +153,8 @@ class Iiko:
             if self.key:
                 key, self.key = self.key, None
                 try:
-                    await self.http.request("GET", self.server.base_url + "/api/logout", params={"key": key})
+                    await self.http.request(
+                        "GET", self.server.base_url + "/api/logout", params={"key": key}, headers=_AUTH_HEADERS,
+                    )
                 except NetworkError:
                     pass

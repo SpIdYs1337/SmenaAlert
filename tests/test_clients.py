@@ -47,7 +47,7 @@ class IikoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request["openDateTo"], "2026-11-18")
         self.assertEqual(request["departmentId"], point.department_id)
         self.assertEqual(request["groupId"], point.group_id)
-        auth = http.calls[0][2]["params"]
+        auth = http.calls[0][2]["form"]
         self.assertEqual(http.calls[0][0], "POST")
         self.assertEqual(auth["pass"], hashlib.sha1(b"local_test_password").hexdigest())
         await client.shifts(point, now())
@@ -66,6 +66,8 @@ class IikoTests(unittest.IsolatedAsyncioTestCase):
         http = FakeHttp([NetworkError(405), self.key, "[]"])
         await Iiko(self.server, http).shifts(outlet(), now())
         self.assertEqual([call[0] for call in http.calls], ["POST", "GET", "GET"])
+        self.assertEqual(http.calls[1][2]["params"], http.calls[0][2]["form"])
+        self.assertEqual(http.calls[1][2]["headers"], http.calls[0][2]["headers"])
 
     async def test_connection_outage_is_coalesced_across_outlets(self):
         http = FakeHttp([self.key, NetworkError()])
