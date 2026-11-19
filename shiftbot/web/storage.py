@@ -36,6 +36,7 @@ class Database:
                     point TEXT REFERENCES points(id) ON DELETE CASCADE,
                     day TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (point,day)
                 );
+                CREATE INDEX IF NOT EXISTS checks_day ON checks(day);
                 CREATE TABLE IF NOT EXISTS deliveries (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, event_key TEXT UNIQUE, point TEXT,
                     point_name TEXT NOT NULL, day TEXT, kind TEXT NOT NULL, outcome TEXT,
@@ -149,6 +150,15 @@ class Database:
         with self.connection() as db:
             return {row[0]: json.loads(row[1]) for row in db.execute(
                 "SELECT point,data FROM checks WHERE day=?", (day,))}
+
+    def check_history(self, first: str, last: str, point: str | None = None):
+        query = "SELECT point,day,data FROM checks WHERE day BETWEEN ? AND ?"
+        params = (first, last)
+        if point is not None:
+            query += " AND point=?"
+            params += (point,)
+        with self.connection() as db:
+            return [(row["point"], row["day"], json.loads(row["data"])) for row in db.execute(query, params)]
 
     def save_check(self, point: str, day: str, value: dict):
         with self.connection() as db:

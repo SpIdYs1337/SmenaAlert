@@ -37,7 +37,7 @@ def opening_time(outlet: Outlet, day: date, store: ScheduleOverrides | None = No
 
 
 def evaluate(outlet: Outlet, shifts: list[Shift], now: datetime, store: ScheduleOverrides | None = None,
-             at_deadline_is_on_time: bool = False) -> Result:
+             at_deadline_is_on_time: bool = False, *, grace: timedelta = timedelta()) -> Result:
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
     now = now.astimezone(MSK)
@@ -61,11 +61,12 @@ def evaluate(outlet: Outlet, shifts: list[Shift], now: datetime, store: Schedule
             opened_at = max(earliest[register] for register in outlet.registers)
     elif earliest:
         opened_at = min(earliest.values())
-    if now < deadline:
+    limit = deadline + grace
+    if now < deadline or (grace and opened_at is None and now <= limit):
         return Result("waiting", deadline, opened_at)
     if opened_at is None:
         return Result("not_open", deadline)
-    on_time = opened_at <= deadline if at_deadline_is_on_time else opened_at < deadline
+    on_time = opened_at <= limit if at_deadline_is_on_time or grace else opened_at < limit
     return Result("on_time" if on_time else "late_open", deadline, opened_at)
 
 

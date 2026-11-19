@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from uuid import UUID
 
 from ..config import DAYS, MSK
@@ -82,6 +82,18 @@ def seed(service: Service):
                    "error": "Нет связи с iiko." if status == "api_error" else None,
                    "revision": revision(db.get("points", point_id), db.get("servers", server_id), db.preferences())}
         db.save_check(point_id, now.date().isoformat(), checked)
+        for age in range(1, 7):
+            day = now.date() - timedelta(days=age)
+            planned = datetime.combine(day, time.fromisoformat(scheduled), MSK)
+            minutes = (index * 3 + age) % 11 - 7
+            outcome = "on_time" if minutes < 0 else "late_open"
+            actual = planned + timedelta(minutes=minutes)
+            if (index + age * 2) % 11 == 0:
+                outcome, actual = "not_open", None
+            db.save_check(point_id, day.isoformat(), {
+                "status": outcome, "deadline": stamp(planned), "opened_at": stamp(actual) if actual else None,
+                "checked_at": stamp(planned + timedelta(minutes=25)),
+            })
         if status in ("late_open", "not_open"):
             service._queue_auto(db.get("points", point_id), checked, now)
     for job in db.queued(stamp(now)):

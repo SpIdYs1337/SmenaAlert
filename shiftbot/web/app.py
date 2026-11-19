@@ -4,18 +4,19 @@ import hmac
 import secrets
 import sqlite3
 import threading
-from datetime import timedelta
+from datetime import date, timedelta
 from time import monotonic
 
 from flask import Flask, abort, jsonify, redirect, render_template, request, session, url_for
 from werkzeug.exceptions import HTTPException
 
 from .. import __version__
-from ..config import ConfigError
+from ..config import ConfigError, MSK
 from ..iiko import IikoError
 from .mail import MailError
 from .service import Service, can_check_receipt
 from .settings import InputError, email_address, flag, iiko_settings, list_ids, number, point_settings, smtp_settings, text
+from .statistics import opening_statistics, openings_on_day
 
 
 def same(left: str, right: str) -> bool:
@@ -134,6 +135,26 @@ def create_app(service: Service, *, admin: str, password: str, secure_cookie=Fal
     @app.get("/api/dashboard")
     def dashboard():
         return jsonify(service.snapshot())
+
+    @app.get("/api/statistics")
+    def statistics():
+        try:
+            period = int(request.args.get("days", "7"))
+        except ValueError:
+            raise InputError("Укажите количество дней для отчёта.") from None
+        period = number(period, "Период отчёта", 1, 90)
+        today = service.now().astimezone(MSK).date()
+        return jsonify(opening_statistics(db, today, period, request.args.get("point") or None))
+
+    @app.get("/api/statistics/day/<day>")
+    def statistics_day(day):
+        try:
+            selected = date.fromisoformat(day)
+        except ValueError:
+            raise InputError("Проверьте дату отчёта.") from None
+        if selected.isoformat() != day or selected > service.now().astimezone(MSK).date():
+            raise InputError("Проверьте дату отчёта.")
+        return jsonify(openings_on_day(db, selected, request.args.get("point") or None))
 
     @app.put("/api/smtp")
     def save_smtp():

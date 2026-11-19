@@ -3,7 +3,7 @@ import imaplib
 import re
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -278,3 +278,68 @@ class WebPanelTests(unittest.TestCase):
         upgraded = Database(self.db.path)
         self.assertEqual(upgraded.delivery(test)["status"], "sent")
         self.assertIsNone(upgraded.delivery(test)["message_id"])
+
+    def test_statistics_uses_the_latest_saved_result_for_each_point_and_day(self):
+        server = self.configure()
+        arbat = self.point(server, "Арбат", [], 1)
+        sokol = self.point(server, "Сокол", [], 2)
+
+        def save(point, age, status, opened_minute=None):
+            scheduled = self.current.replace(minute=0) - timedelta(days=age)
+            self.db.save_check(point, scheduled.date().isoformat(), {
+                "status": status, "deadline": scheduled.isoformat(),
+                "opened_at": None if opened_minute is None else (scheduled + timedelta(minutes=opened_minute)).isoformat(),
+            })
+
+        save(arbat, 0, "not_open")
+        save(arbat, 0, "late_open", 7)
+        save(sokol, 0, "api_error")
+        save(arbat, 1, "on_time", -5)
+        save(sokol, 1, "waiting")
+        save(arbat, 2, "late_open", 3)
+        save(sokol, 2, "not_open")
+        save(sokol, 3, "day_off")
+        save(arbat, 7, "on_time", -10)
+        response = self.client.get("/api/statistics?days=7")
+        self.assertEqual(response.status_code, 200)
+        report = response.get_json()
+        self.assertEqual(len(report["days"]), 7)
+        self.assertEqual(report["from_date"], "2026-11-12")
+        self.assertEqual(report["totals"], {"on_time": 1, "late_open": 2, "not_open": 1, "api_error": 1,
+            "confirmed": 4, "on_time_percent": 25.0, "average_delay_seconds": 300})
+        self.assertEqual(report["days"][-1]["late_open"], 1)
+        self.assertEqual(report["days"][-1]["api_error"], 1)
+        filtered = self.client.get(f"/api/statistics?days=1&point={arbat}").get_json()
+        self.assertEqual([point["name"] for point in filtered["points"]], ["Арбат"])
+        self.assertEqual(filtered["totals"]["average_delay_seconds"], 420)
+        details = self.client.get("/api/statistics/day/2026-11-18").get_json()
+        self.assertEqual(details["points"][0]["opened_at"], "2026-11-18T09:07:00+03:00")
+        self.assertEqual(details["points"][1]["status"], "api_error")
+        self.assertEqual(self.client.get("/api/statistics?days=91").status_code, 400)
+        self.assertEqual(self.client.get("/api/statistics/day/2026-11-19").status_code, 400)
+
+    def test_opening_grace_and_sync_delay_precede_automatic_alerts(self):
+        server = self.configure()
+        person = self.add_person("Анна", "anna@example.org")
+        timely = self.point(server, "Вовремя", [person], 1)
+        late = self.point(server, "Поздно", [person], 2)
+        missing = self.point(server, "Закрыта", [person], 3)
+        self.write("PUT", "/monitor", {"enabled": True, "inclusive": True, "delay_seconds": 10})
+        self.current = self.current.replace(minute=1, second=0)
+        self.assertEqual(asyncio.run(self.service.check()), 0)
+        self.assertEqual(asyncio.run(self.service.check(force=True)), 3)
+        self.assertEqual(self.db.checks("2026-11-18")[missing]["status"], "waiting")
+        self.shifts["Вовремя"] = [Shift(1, self.current)]
+        self.shifts["Поздно"] = [Shift(1, self.current.replace(second=1))]
+        self.current = self.current.replace(second=9)
+        self.assertEqual(asyncio.run(self.service.check()), 0)
+        asyncio.run(self.service.deliver())
+        self.assertEqual(self.smtp.messages, [])
+        self.current = self.current.replace(second=10)
+        self.assertEqual(asyncio.run(self.service.check()), 3)
+        asyncio.run(self.service.deliver())
+        checks = self.db.checks("2026-11-18")
+        self.assertEqual(checks[timely]["status"], "on_time")
+        self.assertEqual(checks[late]["status"], "late_open")
+        self.assertEqual(checks[missing]["status"], "not_open")
+        self.assertEqual(len(self.smtp.messages), 2)

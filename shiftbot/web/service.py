@@ -28,8 +28,14 @@ def clock_label(value: str | None) -> str:
     return datetime.fromisoformat(value).astimezone(MSK).strftime("%H:%M:%S") if value else "—"
 
 
+def opening_grace(prefs: dict) -> timedelta:
+    return timedelta(minutes=1) if prefs["inclusive"] else timedelta()
+
+
 def revision(point: dict, server: dict, prefs: dict) -> str:
     data = [point, server, prefs["inclusive"], prefs["delay_seconds"]]
+    if grace := opening_grace(prefs):
+        data.append(grace.total_seconds())
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode("utf-8")).hexdigest()
 
 
@@ -192,7 +198,10 @@ class Service:
         if scheduled is None:
             return False
         deadline = datetime.combine(now.date(), scheduled, MSK)
-        if not force and now < deadline + timedelta(seconds=prefs["delay_seconds"]):
+        grace = opening_grace(prefs)
+        limit = deadline + grace
+        check_at = limit + timedelta(seconds=prefs["delay_seconds"])
+        if not force and (now < check_at or (grace and now <= limit)):
             return False
         fingerprint = revision(point, server, prefs)
         if not force and previous and previous.get("revision") == fingerprint and previous["status"] in ("on_time", "late_open"):
@@ -208,7 +217,7 @@ class Service:
         if (checked_at.date() != now.date() or self.db.get("points", point["id"]) != point
                 or self.db.get("servers", server["id"]) != server):
             return False
-        result = evaluate(outlet, shifts, checked_at, at_deadline_is_on_time=prefs["inclusive"])
+        result = evaluate(outlet, shifts, checked_at, grace=grace)
         state = {"status": "api_error" if error else result.status, "opened_at": stamp(result.opened_at) if result.opened_at else None,
                  "deadline": stamp(deadline), "checked_at": stamp(checked_at), "error": error, "revision": fingerprint}
         self.db.save_check(point["id"], day, state)
@@ -249,6 +258,7 @@ class Service:
         checks = self.db.checks(now.date().isoformat())
         servers = {server["id"]: server for server in self.db.list("servers")}
         prefs = self.db.preferences()
+        grace = opening_grace(prefs)
         links = self.db.links()
         points = []
         for point in self.db.list("points"):
@@ -259,7 +269,7 @@ class Service:
                 saved = {}
             status = "paused" if not point["active"] else "day_off" if deadline is None else saved.get("status")
             if not status:
-                status = "waiting" if now < deadline else "unknown"
+                status = "waiting" if now < deadline or (grace and now <= deadline + grace) else "unknown"
             points.append({**point, "people": links.get(point["id"], []), "today": {
                 **saved, "status": status, "deadline": stamp(deadline) if deadline else None,
             }})
