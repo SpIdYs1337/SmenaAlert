@@ -7,9 +7,9 @@ const demo = document.body.dataset.demo === "yes";
 const panelName = document.body.dataset.panelName;
 const grants = new Set(document.body.dataset.grants.split(" "));
 const labels = {
-  knowledge: "База знаний", inventory: "IT-инвентарь", admin: "Администрирование", account: "Личный кабинет",
+  knowledge: "База знаний", inventory: "IT-инвентарь", admin: "Администрирование", account: "Мой профиль",
   overview: "Обзор", statistics: "Статистика", points: "Торговые точки", history: "Журнал писем",
-  people: "Получатели", iiko: "Подключение iiko", smtp: "Почта", monitor: "Авторассылка",
+  people: "Получатели", iiko: "Подключение iiko", smtp: "Почта · SMTP", imap: "Почта · IMAP", monitor: "Авторассылка",
 };
 const statusLabels = {
   on_time: ["Вовремя", "green", "check-circle"], late_open: ["Открыта поздно", "amber", "clock"],
@@ -24,7 +24,7 @@ const mailStates = {
 const mailKinds = {auto: "Оповещение", followup: "Уточнение", manual: "Вручную", test: "Тест"};
 const pointPriority = ["not_open", "api_error", "late_open", "waiting", "unknown", "on_time", "day_off", "paused"];
 const days = {mon: "Понедельник", tue: "Вторник", wed: "Среда", thu: "Четверг", fri: "Пятница", sat: "Суббота", sun: "Воскресенье"};
-const ui = {page: "overview", snapshot: null, query: "", filter: "all", statistics: {days: "7", point: ""}};
+const ui = {page: "overview", snapshot: null, query: "", filter: "all", currentPoint: "", statistics: {days: "7", point: ""}};
 let statisticsRequest = 0;
 const timeFormat = new Intl.DateTimeFormat("ru-RU", {timeZone: "Europe/Moscow", hour: "2-digit", minute: "2-digit"});
 const dateFormat = new Intl.DateTimeFormat("ru-RU", {timeZone: "Europe/Moscow", day: "numeric", month: "long", year: "numeric"});
@@ -104,10 +104,9 @@ async function refresh(renderPage = true) {
 }
 function route() {
   const [hash, record] = location.hash.slice(1).split("/");
-  const permitted = Array.from(document.querySelectorAll(".nav [data-page]"), link => link.dataset.page);
-  const next = permitted.includes(hash) ? hash : permitted[0] || "account";
-  if (next === "knowledge" && /^[a-f0-9]{16}$/.test(record || "")) work.currentArticle = record;
-  work.linkedAsset = next === "inventory" && /^[a-f0-9]{16}$/.test(record || "") ? record : "";
+  const permitted = Array.from(document.querySelectorAll("a[data-page]"), link => link.dataset.page);
+  const next = permitted.includes(hash) ? hash : permitted.find(page => page !== "account") || "account";
+  if (/^[a-f0-9]{16}$/.test(record || "") && isWorkPage(next)) work.selection[next] = record;
   const navigating = next !== ui.page;
   if (navigating) {
     if (drawer.open) drawer.close();
@@ -115,11 +114,10 @@ function route() {
     ui.query = "";
     ui.filter = "all";
   }
-  document.querySelector("#sidebar").classList.remove("open");
-  document.querySelector("#mobile-nav").setAttribute("aria-expanded", "false");
+  closeModuleMenu();
   if (ui.snapshot) render();
   if (ui.snapshot && next === "statistics") loadStatistics();
-  if (ui.snapshot && isWorkPage(next)) loadWork();
+  if (ui.snapshot && isWorkPage(next)) loadWork(navigating || work.page !== next || !work.data, Boolean(record));
   if (ui.snapshot && navigating && next === "history") {
     refresh(false).then(() => {
       if (ui.page === "history") render();
@@ -128,15 +126,41 @@ function route() {
     });
   }
 }
+function focusRecord() {
+  const card = content.querySelector(".record-detail");
+  if (!card) return;
+  card.focus({preventScroll: true});
+  if (window.matchMedia("(max-width: 860px)").matches) card.scrollIntoView({block: "start"});
+}
+function returnToRecords() {
+  const list = content.querySelector(".record-layout > .card");
+  if (!list) return;
+  const control = list.querySelector('[aria-pressed="true"], input[type="search"]');
+  if (control) control.focus({preventScroll: true});
+  list.scrollIntoView({block: "start"});
+}
+function listButton() {
+  return button("list-return", "К списку", {kind:"list-return"});
+}
+function closeModuleMenu() {
+  document.querySelector("#module-menu").classList.remove("open");
+  document.querySelector("#mobile-nav").setAttribute("aria-expanded", "false");
+}
 function render() {
   const pages = {overview: pointsPage, statistics: statisticsPage, points: pointsPage, people: peoplePage, history: historyPage,
-    iiko: iikoPage, smtp: mailPage, monitor: monitorPage, knowledge: workPage, inventory: workPage, admin: workPage,
-    account: () => empty("users", "Доступ к разделам пока не назначен", "Обратитесь к администратору панели.")};
-  for (const link of document.querySelectorAll(".nav [data-page]")) {
-    if (link.dataset.page === ui.page) link.setAttribute("aria-current", "page");
+    iiko: iikoPage, smtp: mailPage, imap: mailPage, monitor: monitorPage, knowledge: workPage, inventory: workPage, admin: workPage, account: workPage};
+  const tab = document.querySelector(`.section-nav [data-page="${ui.page}"]`);
+  const section = tab.closest(".section-nav");
+  for (const group of document.querySelectorAll(".section-nav")) group.hidden = group !== section;
+  for (const link of document.querySelectorAll("a[data-page]")) {
+    if (link.dataset.module === section.dataset.section) link.setAttribute("aria-current", "location");
+    else if (!link.dataset.module && link.dataset.page === ui.page) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
   }
-  document.querySelector("#crumb").textContent = labels[ui.page];
+  for (const shortcut of section.querySelectorAll("[data-action]")) {
+    shortcut.disabled = work.page !== ui.page || !work.data ||
+      shortcut.dataset.action === "work-move-selected" && !work.asset;
+  }
   const mode = document.querySelector("#mode");
   if (mode) {
     const active = ui.snapshot.monitor.enabled;
@@ -167,38 +191,36 @@ function isWaiting(point) { return ["waiting", "unknown"].includes(point.today.s
 function pointsPage() {
   const {points, now} = ui.snapshot;
   const overview = ui.page === "overview";
-  const subtitle = overview ? `${icon("calendar")}${dateFormat.format(new Date(now))} · МСК` :
-    "Графики открытия и ответственные за каждую точку";
-  if (!points.length) {
-    return pageHead(overview ? "Открытие точек" : labels.points, subtitle, button("point-new", "Добавить точку", {icon: "plus", kind: "primary"})) +
-      `<section class="card">${empty("store", "Вы ещё не добавили точки", "Подключите iiko и задайте график первой точки.",
-        `<a href="#iiko" class="button">${icon("link")}Настроить iiko</a>`)}</section>`;
-  }
+  const title = overview ? "Открытие смен" : labels.points;
+  const subtitle = overview ? `${icon("calendar")}${dateFormat.format(new Date(now))} · МСК` : "";
+  const add = button("point-new", "Добавить точку", {icon:"plus", kind:"primary"});
+  if (!points.length) return pageHead(title, subtitle, add) +
+    `<section class="card">${empty("store", "Вы ещё не добавили точки", "Подключите iiko и задайте график первой точки.",
+      `<a href="#iiko" class="button">${icon("link")}Настроить iiko</a>`)}</section>`;
   const filters = [["all", "Все статусы"], ["on_time", statusLabels.on_time[0]], ["late", "Все опоздания"],
     ["not_open", statusLabels.not_open[0]], ["late_open", statusLabels.late_open[0]], ["waiting", "Ожидают"],
     ["api_error", statusLabels.api_error[0]], ["day_off", "Выходной"], ["paused", "На паузе"]];
+  const statuses = ["on_time", "late_open", "not_open"];
+  if (points.some(point => point.today.status === "api_error")) statuses.push("api_error");
   const scores = overview ? `<div class="metrics" role="group" aria-label="Фильтры смен">
-    ${metric("all", "Все точки", points.length)}
-    ${["not_open", "late_open", "api_error"].map(status => {
+    ${metric("all", "Все точки", points.length)}${statuses.map(status => {
       const [label, tone] = statusLabels[status];
       return metric(status, label, points.filter(point => point.today.status === status).length, tone);
-    }).join("")}
-  </div>` : "";
+    }).join("")}</div>` : "";
   const latest = points.map(point => point.today.checked_at).filter(Boolean).sort().at(-1);
-  return pageHead(overview ? "Открытие точек" : labels.points, subtitle,
-    button("check-all", "Проверить сейчас", {icon: "refresh"}) + button("point-new", "Добавить точку", {icon: "plus", kind: "primary"})) +
-    scores + `<section class="card">
-    <div class="card-head"><div class="card-headline"><h2>Точки сети</h2><span class="count">${points.length}</span></div>
-      <div class="table-controls">${search("Поиск точки")}${overview ? "" : selectFilter(filters)}</div></div>
-    <div class="table-wrap"><table class="point-table" aria-label="Точки сети"><thead><tr>
-      <th scope="col">Точка</th><th scope="col">По графику</th><th scope="col">Открыта</th><th scope="col">Статус</th>
-      <th scope="col">Ответственные</th><th scope="col"><span class="sr-only">Действия</span></th>
-    </tr></thead><tbody id="table-rows">${pointRows()}</tbody></table></div>
+  const visible = filteredPoints();
+  return pageHead(title, subtitle, button("check-all", "Проверить сейчас", {icon:"refresh"}) + add) + scores +
+    `<div class="record-layout monitor-layout"><section class="card"><div class="card-head"><div class="card-headline"><h2>Точки сети</h2><span class="count">${points.length}</span></div>
+    <div class="table-controls">${search("Поиск точки")}${selectFilter(filters)}</div></div>
+    <div class="table-wrap"><table class="point-table" aria-label="Точки сети"><thead><tr><th scope="col">Точка</th>
+    <th scope="col">По графику</th><th scope="col">Открыта</th><th scope="col">Статус</th></tr></thead>
+    <tbody id="table-rows">${pointRows(visible)}</tbody></table></div>
     <div class="table-foot"><span>${latest ? `Последняя проверка в ${time(latest)} МСК` : "Данные ещё не проверены"}</span>
-      <a href="#history" class="text-button">Журнал писем <span aria-hidden="true">→</span></a></div>
-    </section>`;
+    <a href="#history" class="text-button">Журнал писем →</a></div></section>
+    <div id="point-detail" aria-label="Карточка торговой точки">${pointDetail(visible)}</div></div>`;
 }
-function pointRows() {
+
+function filteredPoints() {
   const people = new Map(ui.snapshot.people.map(person => [person.id, person]));
   const points = ui.snapshot.points.filter(point => {
     const status = point.today.status;
@@ -206,25 +228,37 @@ function pointRows() {
       ui.filter === "waiting" && isWaiting(point);
     return matches && includesQuery(point.name, ...point.people.map(id => people.get(id)?.name));
   });
-  if (ui.page === "overview") {
-    points.sort((left, right) => pointPriority.indexOf(left.today.status) - pointPriority.indexOf(right.today.status));
-  }
+  if (ui.page === "overview") points.sort((a, b) => pointPriority.indexOf(a.today.status) - pointPriority.indexOf(b.today.status));
+  if (!points.some(point => point.id === ui.currentPoint)) ui.currentPoint = points[0]?.id || "";
+  return points;
+}
+
+function pointRows(points) {
   return points.map(point => {
     const state = point.today;
-    const assigned = point.people.map(id => people.get(id)).filter(person => person?.active);
-    return `<tr data-action="point-edit" data-id="${point.id}">
-      <td><button class="point-button" type="button" data-action="point-edit" data-id="${point.id}">
-        <span class="point-icon">${icon("store")}</span>${esc(point.name)}</button></td>
+    const active = point.id === ui.currentPoint;
+    return `<tr data-action="point-select" data-id="${esc(point.id)}" class="${active ? "selected-row" : ""}">
+      <td><button class="point-button" type="button" data-action="point-select" data-id="${esc(point.id)}" aria-pressed="${active}">${esc(point.name)}</button></td>
       <td class="tabular" data-label="По графику">${time(state.deadline)}</td>
-      <td class="tabular ${!state.opened_at ? "muted" : ""}" data-label="Открыта">${time(state.opened_at)}</td>
-      <td data-label="Статус">${badge(...(statusLabels[state.status] || statusLabels.unknown))}
-        ${state.status === "waiting" && state.check_at ? `<span class="status-time">Проверка с ${time(state.check_at)}</span>` : ""}</td>
-      <td class="people-cell" data-label="Ответственные">${assigned.length ? esc(assigned.map(person => person.name).join(", ")) : "Не назначены"}</td>
-      <td><div class="table-end">${iconButton("point-mail", "Предпросмотр письма", "mail", point.id)}
-        ${iconButton("point-edit", "Редактировать точку", "right", point.id)}</div></td>
-    </tr>`;
-  }).join("") || `<tr><td colspan="6" class="empty-cell">${empty("search", "Точки не найдены", "Измените поиск или фильтр.")}</td></tr>`;
+      <td class="tabular" data-label="Открыта">${time(state.opened_at)}</td>
+      <td data-label="Статус">${badge(...(statusLabels[state.status] || statusLabels.unknown))}</td></tr>`;
+  }).join("") || `<tr><td colspan="4" class="empty-cell">${empty("search", "Точки не найдены", "Измените поиск или фильтр.")}</td></tr>`;
 }
+
+function pointDetail(visible) {
+  const point = visible.find(item => item.id === ui.currentPoint);
+  if (!point) return "";
+  const state = point.today;
+  const assigned = ui.snapshot.people.filter(person => point.people.includes(person.id) && person.active);
+  return `<section class="card record-detail" tabindex="-1"><div class="card-head"><h2>${esc(point.name)}</h2>${listButton()}</div><div class="card-body stack">
+    <div>${badge(...(statusLabels[state.status] || statusLabels.unknown))}</div>
+    <dl class="profile-facts"><div><dt>По графику</dt><dd>${time(state.deadline)}</dd></div><div><dt>Открыта</dt><dd>${time(state.opened_at)}</dd></div>
+    <div><dt>Проверка с</dt><dd>${time(state.check_at)}</dd></div><div><dt>Последняя проверка</dt><dd>${time(state.checked_at)}</dd></div>
+    <div><dt>Ответственные</dt><dd>${assigned.length ? assigned.map(person => esc(person.name)).join(", ") : "Не назначены"}</dd></div></dl>
+    <div class="row">${button("point-edit","График точки",{icon:"pencil",id:point.id})}
+    ${button("point-mail","Предпросмотр письма",{icon:"mail",id:point.id})}</div></div></section>`;
+}
+
 function peoplePage() {
   const list = ui.snapshot.people;
   return pageHead(labels.people, "Адреса для оповещений и их торговые точки",
@@ -398,9 +432,22 @@ function healthBadge(configured, health) {
 }
 function mailPage() {
   const {smtp, smtp_health: health, imap} = ui.snapshot;
-  return pageHead(labels.smtp, "Отправка оповещений и проверка входящих") +
-    `<div class="settings-grid">
-      <section class="card"><div class="card-head"><h2>SMTP · Отправитель</h2>${healthBadge(smtp.host, health)}</div>
+  const channel = ui.page === "imap" ? imapCard(imap) : smtpCard(smtp, health);
+  return pageHead(labels[ui.page], "") + `<div class="settings-grid">${channel}
+    <section class="card"><div class="card-head"><h2>Тестовое письмо</h2><span class="point-icon">${icon("send")}</span></div>
+          <form class="card-body stack" data-form="smtp-test">
+            <div class="error-box" data-error role="alert"></div>
+            <label>Email получателя<input name="email" type="email" required placeholder="manager@example.org" value="${esc(imap.email)}">
+              ${imap.email ? '<span class="hint">Проверка через IMAP доступна для адреса подключённого ящика.</span>' : ""}</label>
+            <div class="row"><button class="button" ${disabled(!smtp.host)}>${icon("send")}Отправить тест</button></div>
+            <div id="test-result" aria-live="polite"></div>
+            <a class="text-button" href="#history">Открыть журнал писем →</a>
+          </form>
+        </section>
+    </div>`;
+}
+function smtpCard(smtp, health) {
+  return `<section class="card"><div class="card-head"><h2>SMTP · Отправитель</h2>${healthBadge(smtp.host, health)}</div>
         <form id="smtp-form" class="card-body stack" data-form="smtp">
           <div class="error-box" data-error role="alert"></div>
           <div class="field-grid smtp-grid">
@@ -421,21 +468,7 @@ function mailPage() {
             ${button("smtp-probe", "Проверить соединение", {icon: "refresh", disabled: !smtp.host})}</div>
           ${health ? `<div class="${health.ok ? "result-box" : "error-box"}" role="status">${esc(health.message)}</div>` : ""}
         </form>
-      </section>
-      <div class="stack">
-        ${imapCard(imap)}
-        <section class="card"><div class="card-head"><h2>Тестовое письмо</h2><span class="point-icon">${icon("send")}</span></div>
-          <form class="card-body stack" data-form="smtp-test">
-            <div class="error-box" data-error role="alert"></div>
-            <label>Email получателя<input name="email" type="email" required placeholder="manager@example.org" value="${esc(imap.email)}">
-              ${imap.email ? '<span class="hint">Проверка через IMAP доступна для адреса подключённого ящика.</span>' : ""}</label>
-            <div class="row"><button class="button" ${disabled(!smtp.host)}>${icon("send")}Отправить тест</button></div>
-            <div id="test-result" aria-live="polite"></div>
-            <a class="text-button" href="#history">Открыть журнал писем →</a>
-          </form>
-        </section>
-      </div>
-    </div>`;
+      </section>`;
 }
 function imapCard(imap) {
   return `<section class="card"><div class="card-head"><h2>IMAP · Входящие</h2>${healthBadge(imap.host, imap.health)}</div>
@@ -749,6 +782,8 @@ async function remove(action, id) {
 }
 const actions = {
   ...workActions,
+  "point-select": id => { ui.currentPoint = id; updateRows(); focusRecord(); },
+  "list-return": returnToRecords,
   "statistics-day": openStatisticsDay,
   "statistics-point": async id => {
     ui.statistics.point = id;
@@ -877,7 +912,11 @@ function updateRows() {
   if (!rows) return;
   if (ui.page === "history") rows.innerHTML = historyRows();
   else if (ui.page === "people") rows.innerHTML = peopleRows();
-  else rows.innerHTML = pointRows();
+  else {
+    const visible = filteredPoints();
+    rows.innerHTML = pointRows(visible);
+    document.querySelector("#point-detail").innerHTML = pointDetail(visible);
+  }
 }
 document.addEventListener("input", event => {
   if (event.target.id === "table-search") {
@@ -909,8 +948,22 @@ document.addEventListener("change", event => {
   }
 });
 document.querySelector("#mobile-nav").addEventListener("click", event => {
-  const isOpen = document.querySelector("#sidebar").classList.toggle("open");
+  const isOpen = document.querySelector("#module-menu").classList.toggle("open");
   event.currentTarget.setAttribute("aria-expanded", String(isOpen));
+});
+document.querySelector("#module-menu").addEventListener("click", closeModuleMenu);
+document.querySelector(".skip-link").addEventListener("click", event => {
+  event.preventDefault();
+  content.focus();
+});
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape" && document.querySelector("#module-menu").classList.contains("open")) {
+    closeModuleMenu();
+    document.querySelector("#mobile-nav").focus();
+  }
+});
+document.addEventListener("click", event => {
+  if (!event.target.closest(".app-header")) closeModuleMenu();
 });
 drawer.addEventListener("cancel", event => {
   if (drawer.querySelector(".drawer-form")?.dataset.busy) event.preventDefault();

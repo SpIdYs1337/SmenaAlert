@@ -101,6 +101,25 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(response.status_code, expect, response.get_data(as_text=True))
         return response.get_json()
 
+    def test_profile_only_shows_the_current_employees_permitted_equipment(self):
+        first = self.staff("first", ["inventory.read"])
+        second = self.staff("second", ["inventory.read"])
+        reader = self.staff("reader", ["knowledge.read"])
+        for employee in (first, second, reader):
+            item = self.write("inventory", {"name": "Ноутбук", "tag": employee, "day": "2026-11-20"})["id"]
+            path = "/api/work/inventory/" + item
+            version = self.owner.get(path).json["version"]
+            self.write("inventory/" + item + "/events", {"action": "assign", "employee": employee,
+                       "day": "2026-11-20", "version": version})
+        user, _ = self.activate("first")
+        profile = user.get("/api/work/profile", query_string={"employee": second}).json
+        self.assertEqual(profile["person"]["id"], first)
+        self.assertNotIn("password_hash", profile["person"])
+        self.assertEqual([item["tag"] for item in profile["assigned"]], [first])
+        restricted, _ = self.activate("reader")
+        self.assertEqual(restricted.get("/api/work/profile").json["assigned"], [])
+        self.assertEqual(self.app.test_client().get("/api/work/profile").status_code, 401)
+
     def test_first_login_module_permissions_reset_and_deactivation(self):
         employee = self.staff()
         user, token = self.activate("engineer")

@@ -38,6 +38,12 @@ def workspace_api(service, accounts):
     def now():
         return service.now().astimezone(MSK)
 
+    @api.get("/profile")
+    def profile():
+        person = g.user
+        assigned = inventory.assets(person["id"]) if "inventory.read" in person["grants"] else []
+        return jsonify(person=person, permissions=PERMISSIONS, assigned=assigned)
+
     @api.get("/employees")
     @requires("admin.manage")
     def employees():
