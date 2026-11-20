@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from datetime import datetime, time, timedelta
+from secrets import token_urlsafe
 from uuid import UUID
 
 from ..config import DAYS, MSK
 from ..domain import Shift
 from ..iiko import IikoError
+from .access import Accounts
+from .inventory import Inventory
+from .knowledge import Knowledge
 from .service import Service, revision, stamp
 
 
@@ -101,3 +105,29 @@ def seed(service: Service):
             service._queue_auto(db.get("points", point_id), checked, now)
     for job in db.queued(stamp(now)):
         db.finish(job["id"], "sent", 1, delivered_at=stamp(now))
+
+
+def seed_workspace(service):
+    now = service.now().astimezone(MSK)
+    accounts = Accounts(service.db, "Администратор")
+    author = accounts.owner
+    team = (
+        ("Анна Орлова", "anna.demo", ["knowledge.read"]),
+        ("Иван Петров", "ivan.demo", ["knowledge.write", "inventory.write"]),
+    )
+    assignees = []
+    for name, login, grants in team:
+        assignees.append(accounts.save({"name": name, "login": login, "password": token_urlsafe(18), "grants": grants},
+                                       author["id"]))
+    knowledge = Knowledge(service.db)
+    root = knowledge.save({"title": "IT", "body": "Инструкции по оборудованию торговых точек."}, stamp(now), author["name"])
+    knowledge.import_file("Выдача ноутбука.md", (
+        "# Приёмка\nПроверьте комплектность устройства.\n## Сверка серийного номера\n"
+        "Сверьте номер на корпусе с накладной.\n# Выдача сотруднику\nВыберите устройство, сотрудника и дату выдачи."
+    ).encode(), root, stamp(now), author["name"])
+    inventory = Inventory(service.db)
+    received = (now.date() - timedelta(days=5)).isoformat()
+    laptop = inventory.receive({"tag": "IT-014", "name": "Ноутбук", "serial": "DEMO-014", "day": received}, now, author)
+    inventory.receive({"tag": "IT-015", "name": "Монитор", "day": received}, now, author)
+    inventory.move(laptop, {"action": "assign", "employee": assignees[0], "day": now.date().isoformat(),
+                            "version": inventory.details(laptop)["version"]}, now, author)

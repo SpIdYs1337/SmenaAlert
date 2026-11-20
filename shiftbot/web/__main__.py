@@ -12,8 +12,8 @@ from waitress import serve
 
 from ..config import ConfigError, load_env
 from .app import create_app
+from .demo import DemoIiko, DemoMail, demo_now, seed, seed_workspace
 from .knowledge import DOCUMENT_LIMIT
-from .demo import DemoIiko, DemoMail, demo_now, seed
 from .service import Service
 from .settings import Vault
 from .storage import Database
@@ -35,6 +35,7 @@ def start(directory: Path, args, admin: str, password: str):
             mail = DemoMail()
             service = Service(db, vault, mailer=mail, mailbox=mail, iiko_factory=DemoIiko, now=demo_now)
             seed(service)
+            seed_workspace(service)
         else:
             service = Service(db, vault)
         app = create_app(service, admin=admin, password=password, demo=args.demo,
