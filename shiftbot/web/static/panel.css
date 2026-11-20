@@ -348,3 +348,21 @@ summary { cursor: pointer; color: var(--ink); font-weight: 610; }
 @media (pointer: coarse) {
   .metric, .nav a, .mobile-nav, .stats-day { min-height: 44px; }
 }
+
+.work-split { display: grid; grid-template-columns: minmax(180px, .7fr) minmax(0, 2fr); gap: 18px; align-items: start; }
+.work-split .card { min-width: 0; }
+.work-tree-search { padding-bottom: 0; }
+.kb-tree { list-style: none; padding: 0; margin: 0; }
+.kb-tree .kb-tree { margin-left: 9px; padding-left: 7px; border-left: 1px solid var(--line); }
+.kb-tree button { width: 100%; min-height: 38px; padding: 6px 8px; text-align: left; border: 0; border-radius: 7px; background: transparent; overflow-wrap: anywhere; }
+.kb-tree button:hover, .kb-tree button[aria-current] { background: var(--neutral-bg); }
+.kb-tree button[aria-current] { font-weight: 650; }
+.kb-body { white-space: pre-wrap; line-height: 1.65; overflow-wrap: anywhere; }
+.kb-body:empty { display: none; }
+.work-file { justify-self: start; overflow-wrap: anywhere; }
+.work-serial, .movement-list small { color: var(--muted); display: block; }
+.movement-list { padding: 0; list-style: none; }
+.movement-list li { padding: 10px 0; display: grid; gap: 3px; border-top: 1px solid var(--line); }
+.work-rights { border: 0; padding: 0; min-width: 0; }
+.work-rights legend { font-weight: 650; margin-bottom: 8px; }
+@media(max-width: 760px) { .work-split { grid-template-columns: minmax(0, 1fr); } }

@@ -16,7 +16,14 @@ MAX_TEXT = 180_000
 MAX_NODES = 300
 MAX_DEPTH = 24
 WORD = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-OUTLINE = re.compile(r"^(\d{1,2}(?:\.\d{1,2}){0,5})[.)]?\s+(.+)$")
+OUTLINE = re.compile(r"^(\d{1,3}(?:\.\d{1,3}){1,7}[.)]?|\d{1,3}[.)])\s+(.+)$")
+
+
+def numbered_item(line):
+    match = OUTLINE.fullmatch(line.strip())
+    if match:
+        return match[1].rstrip(".)").count(".") + 1, match[2]
+    return None
 
 
 def body_text(value):
@@ -58,6 +65,7 @@ def word_lines(raw):
                     level = style.find(f"{WORD}pPr/{WORD}outlineLvl")
                     if level is not None:
                         styles[style.get(WORD + "styleId")] = level.get(WORD + "val")
+            heading_depth = 0
             for paragraph in document.iter(WORD + "p"):
                 value = paragraph_text(paragraph)
                 style = paragraph.find(f"{WORD}pPr/{WORD}pStyle")
@@ -68,7 +76,23 @@ def word_lines(raw):
                 heading = int(match[1]) if match else 0
                 if level in tuple("012345678"):
                     heading = int(level) + 1
-                yield heading, value
+                if heading:
+                    heading_depth = heading
+                    yield heading, value
+                    continue
+                list_style = paragraph.find(f"{WORD}pPr/{WORD}numPr")
+                if list_style is not None:
+                    number_id = list_style.find(WORD + "numId")
+                    indent = list_style.find(WORD + "ilvl")
+                    depth = indent.get(WORD + "val", "0") if indent is not None else "0"
+                    if number_id is not None and number_id.get(WORD + "val") != "0" and depth in tuple("012345678"):
+                        yield heading_depth + 1 + int(depth), value
+                        continue
+                numbered = numbered_item(value)
+                if numbered:
+                    yield heading_depth + numbered[0], numbered[1]
+                else:
+                    yield 0, value
     except (zipfile.BadZipFile, KeyError, ET.ParseError, RuntimeError, NotImplementedError, OSError):
         raise InputError("Не удалось прочитать DOCX. Сохраните документ в формате Word DOCX заново.") from None
 
@@ -89,11 +113,11 @@ def plain_lines(raw, markdown):
             yield 0, line
             continue
         heading = re.match(r"^(#{1,6})\s+(.+)$", line) if markdown and not fence else None
-        numbered = OUTLINE.fullmatch(line.strip()) if not fence else None
+        numbered = numbered_item(line) if not fence else None
         if heading:
             yield len(heading[1]), heading[2]
         elif numbered:
-            yield numbered[1].count(".") + 1, numbered[2]
+            yield numbered
         else:
             yield 0, line
 
@@ -141,12 +165,16 @@ def parse_document(filename, raw):
         if length > MAX_TEXT:
             raise InputError("Текст документа превышает 180 000 символов.")
         if level and line.strip():
-            title = text({"title": line}, "title", "Заголовок документа", limit=240)
+            title = " ".join(body_text(line).split())
+            body = []
+            if len(title) > 240:
+                body.append(line)
+                title = title[:239].rstrip() + "…"
             while stack[-1][0] >= level:
                 stack.pop()
             if len(entries) >= MAX_NODES:
                 raise InputError("За один импорт можно создать до 300 пунктов.")
-            entries.append({"title": title, "lines": [], "parent": stack[-1][1]})
+            entries.append({"title": title, "lines": body, "parent": stack[-1][1]})
             stack.append((level, len(entries) - 1))
         else:
             entries[stack[-1][1]]["lines"].append(line)

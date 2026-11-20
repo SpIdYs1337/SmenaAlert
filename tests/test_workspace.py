@@ -163,6 +163,23 @@ class WorkspaceTests(unittest.TestCase):
         pdf = self.upload("Памятка.pdf", pdf_document())
         self.assertEqual(self.owner.get("/api/work/knowledge/"+pdf["id"]).json["body"], "Knowledge")
 
+    def test_word_multilevel_numbering_becomes_editable_children(self):
+        xml = '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'
+        long_title = "Проверьте устройство. " * 20
+        for level, line in ((0, "Осмотр"), (1, long_title), (0, "Передача")):
+            xml += (f'<w:p><w:pPr><w:numPr><w:ilvl w:val="{level}"/><w:numId w:val="3"/></w:numPr></w:pPr>'
+                    f'<w:r><w:t>{line}</w:t></w:r></w:p>')
+        result = io.BytesIO()
+        with zipfile.ZipFile(result, "w") as zipped:
+            zipped.writestr("word/document.xml", (xml+"</w:body></w:document>").encode())
+        root = self.upload("Регламент.docx", result.getvalue())["id"]
+        tree = self.owner.get("/api/work/knowledge").json["items"]
+        sections = [item for item in tree if item["parent"] == root]
+        self.assertEqual([s["title"] for s in sections], ["Осмотр", "Передача"])
+        leaf = next(item for item in tree if item["parent"] == sections[0]["id"])
+        self.assertLessEqual(len(leaf["title"]), 240)
+        self.assertEqual(self.owner.get("/api/work/knowledge/"+leaf["id"]).json["body"], long_title.strip())
+
     def test_bad_import_rolls_back_and_file_limits_are_enforced(self):
         self.upload("broken.docx", b"bad", 400)
         self.upload("empty.txt", b"", 400)
@@ -195,6 +212,37 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual((row["state"],row["employee"],row["received_on"]), ("stock",None,"2026-11-16"))
         for day in ("2026-11-19","2026-11-21"):
             self.write(path+"/events", {"version":details()["version"], "action":"assign", "employee":first, "day":day}, expect=400)
+
+    def test_reader_can_download_but_cannot_import_or_change_monitor(self):
+        doc = self.upload("Руководство.txt", "Инструкция".encode())["id"]
+        self.staff("reader")
+        reader, token = self.activate("reader")
+        self.assertEqual(reader.get(f"/api/work/knowledge/{doc}/original").data, "Инструкция".encode())
+        upload = reader.post("/api/work/knowledge/import", data={"file": (io.BytesIO(b"note"), "x.txt")},
+                             headers={"X-CSRF-Token": token})
+        self.assertEqual(upload.status_code, 403)
+        self.assertEqual(reader.put("/api/monitor", json={"enabled": True},
+                                    headers={"X-CSRF-Token": token}).status_code, 403)
+        self.assertFalse(self.db.preferences()["enabled"])
+        self.assertEqual(self.owner.post("/api/work/inventory", json={}).status_code, 403)
+
+    def test_disabled_holder_remains_in_history_and_can_return_device(self):
+        employee = self.staff()
+        asset = self.write("inventory", {"tag": "IT-2", "name": "Монитор", "day": "2026-11-20"})["id"]
+        path = "inventory/" + asset
+        def version():
+            return self.owner.get("/api/work/" + path).json["version"]
+        self.write(path + "/events", {"action": "assign", "employee": employee, "version": version(), "day": "2026-11-20"})
+        held = self.owner.get("/api/work/inventory", query_string={"employee": employee}).json["items"]
+        self.assertEqual([item["id"] for item in held], [asset])
+        entry = self.owner.get("/api/work/employees").json["items"][0]
+        self.write("employees/" + employee, {**entry, "active": False, "name": "Архив"}, method="PUT", expect=200)
+        self.assertEqual(self.owner.get("/api/work/inventory/assignees").json["items"], [])
+        self.write(path + "/events", {"action": "return", "version": version(), "day": "2026-11-20"})
+        self.write(path + "/events", {"action": "assign", "employee": employee, "version": version(),
+                                      "day": "2026-11-20"}, expect=400)
+        events = self.owner.get("/api/work/" + path).json["events"]
+        self.assertEqual(events[1]["employee_name"], "engineer")
 
     def test_upgrade_keeps_legacy_monitor_volume_and_is_repeatable(self):
         with tempfile.TemporaryDirectory() as directory:

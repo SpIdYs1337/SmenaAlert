@@ -5,7 +5,9 @@ const drawer = document.querySelector("#drawer");
 const csrf = document.querySelector("[name=csrf]").content;
 const demo = document.body.dataset.demo === "yes";
 const panelName = document.body.dataset.panelName;
+const grants = new Set(document.body.dataset.grants.split(" "));
 const labels = {
+  knowledge: "База знаний", inventory: "IT-инвентарь", admin: "Администрирование", account: "Личный кабинет",
   overview: "Обзор", statistics: "Статистика", points: "Торговые точки", history: "Журнал писем",
   people: "Получатели", iiko: "Подключение iiko", smtp: "Почта", monitor: "Авторассылка",
 };
@@ -77,11 +79,11 @@ function toast(message, error = false) {
 async function api(path, method = "GET", body) {
   const headers = {Accept: "application/json"};
   if (method !== "GET") {
-    headers["Content-Type"] = "application/json";
+    if (!(body instanceof FormData)) headers["Content-Type"] = "application/json";
     headers["X-CSRF-Token"] = csrf;
   }
   const response = await fetch(`/api${path}`, {
-    method, headers, body: method === "GET" ? undefined : JSON.stringify(body ?? {}),
+    method, headers, body: method === "GET" ? undefined : body instanceof FormData ? body : JSON.stringify(body ?? {}),
   });
   if (response.status === 401) {
     location.assign("/login");
@@ -96,14 +98,19 @@ async function refresh(renderPage = true) {
   if (renderPage) {
     render();
     if (ui.page === "statistics") await loadStatistics();
+    if (isWorkPage(ui.page)) await loadWork();
   }
   return ui.snapshot;
 }
 function route() {
-  const hash = location.hash.slice(1);
-  const next = Object.hasOwn(labels, hash) ? hash : "overview";
+  const [hash, record] = location.hash.slice(1).split("/");
+  const permitted = Array.from(document.querySelectorAll(".nav [data-page]"), link => link.dataset.page);
+  const next = permitted.includes(hash) ? hash : permitted[0] || "account";
+  if (next === "knowledge" && /^[a-f0-9]{16}$/.test(record || "")) work.currentArticle = record;
+  work.linkedAsset = next === "inventory" && /^[a-f0-9]{16}$/.test(record || "") ? record : "";
   const navigating = next !== ui.page;
   if (navigating) {
+    if (drawer.open) drawer.close();
     ui.page = next;
     ui.query = "";
     ui.filter = "all";
@@ -112,6 +119,7 @@ function route() {
   document.querySelector("#mobile-nav").setAttribute("aria-expanded", "false");
   if (ui.snapshot) render();
   if (ui.snapshot && next === "statistics") loadStatistics();
+  if (ui.snapshot && isWorkPage(next)) loadWork();
   if (ui.snapshot && navigating && next === "history") {
     refresh(false).then(() => {
       if (ui.page === "history") render();
@@ -122,16 +130,19 @@ function route() {
 }
 function render() {
   const pages = {overview: pointsPage, statistics: statisticsPage, points: pointsPage, people: peoplePage, history: historyPage,
-    iiko: iikoPage, smtp: mailPage, monitor: monitorPage};
+    iiko: iikoPage, smtp: mailPage, monitor: monitorPage, knowledge: workPage, inventory: workPage, admin: workPage,
+    account: () => empty("users", "Доступ к разделам пока не назначен", "Обратитесь к администратору панели.")};
   for (const link of document.querySelectorAll(".nav [data-page]")) {
     if (link.dataset.page === ui.page) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
   }
   document.querySelector("#crumb").textContent = labels[ui.page];
   const mode = document.querySelector("#mode");
-  const active = ui.snapshot.monitor.enabled;
-  mode.classList.toggle("on", active);
-  mode.innerHTML = `<span class="dot"></span>Авторассылка ${active ? "включена" : "на паузе"}`;
+  if (mode) {
+    const active = ui.snapshot.monitor.enabled;
+    mode.classList.toggle("on", active);
+    mode.innerHTML = `<span class="dot"></span>Авторассылка ${active ? "включена" : "на паузе"}`;
+  }
   document.title = `${labels[ui.page]} · ${panelName}`;
   content.innerHTML = pages[ui.page]();
 }
@@ -666,6 +677,7 @@ async function trackTest(id, container) {
   if (container.isConnected) container.innerHTML = '<p class="notice">Письмо в очереди. Статус доступен в журнале.</p>';
 }
 async function handleForm(form) {
+  if (form.dataset.form.startsWith("work-")) return submitWork(form);
   const values = new FormData(form);
   const id = form.dataset.id;
   switch (form.dataset.form) {
@@ -736,6 +748,7 @@ async function remove(action, id) {
   toast("Запись удалена.");
 }
 const actions = {
+  ...workActions,
   "statistics-day": openStatisticsDay,
   "statistics-point": async id => {
     ui.statistics.point = id;

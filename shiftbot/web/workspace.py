@@ -90,7 +90,7 @@ def workspace_api(service, accounts):
     @api.get("/inventory")
     @requires("inventory.read")
     def assets():
-        return jsonify(items=inventory.assets(), states=STATES, actions=ACTIONS, today=now().date().isoformat())
+        return jsonify(items=inventory.assets(request.args.get("employee")), states=STATES, actions=ACTIONS, today=now().date().isoformat())
 
     @api.get("/inventory/assignees")
     @requires("inventory.write")

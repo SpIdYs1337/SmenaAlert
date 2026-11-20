@@ -32,14 +32,18 @@ class Inventory:
     def __init__(self, db):
         self.db = db
 
-    def assets(self):
-        with self.db.connection() as conn:
-            return [dict(row) for row in conn.execute("""
+    def assets(self, employee=None):
+        query = """
                 SELECT a.*,e.id AS version,e.day,e.state,e.employee,e.employee_name,r.day AS received_on
                 FROM assets a JOIN asset_events e ON e.id=(SELECT max(id) FROM asset_events WHERE asset=a.id)
                     JOIN asset_events r ON r.asset=a.id AND r.action='receive'
-                ORDER BY a.tag_key
-            """)]
+        """
+        params = ()
+        if employee is not None:
+            query += " WHERE e.employee=?"
+            params = (employee,)
+        with self.db.connection() as conn:
+            return [dict(row) for row in conn.execute(query + " ORDER BY a.tag_key", params)]
 
     def details(self, item):
         with self.db.connection() as conn:
