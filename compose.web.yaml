@@ -11,6 +11,8 @@ services:
     volumes:
       - panel_data:/app/data
     read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=96m,mode=1777
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     stop_grace_period: 60s

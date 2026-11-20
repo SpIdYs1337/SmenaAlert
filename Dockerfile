@@ -1,6 +1,6 @@
 FROM python:3.12-slim-bookworm
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 TZ=Europe/Moscow
-RUN apt-get update && apt-get install -y --no-install-recommends tzdata ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata ca-certificates poppler-utils \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --home /app bot \
     && mkdir -p /app/data && chown -R bot:bot /app

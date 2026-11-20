@@ -47,6 +47,7 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS deliveries_ready ON deliveries(status,retry_at,id);
             """)
+            db.executescript(Path(__file__).with_name("workspace.sql").read_text(encoding="utf-8"))
             db.execute("BEGIN IMMEDIATE")
             if not any(column["name"] == "message_id" for column in db.execute("PRAGMA table_info(deliveries)")):
                 db.execute("ALTER TABLE deliveries ADD COLUMN message_id TEXT")
