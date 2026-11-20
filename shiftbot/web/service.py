@@ -43,6 +43,12 @@ def can_check_receipt(job: dict, config: dict) -> bool:
             and job["recipient"] == config.get("email"))
 
 
+AUTO_ALERT_TITLES = {
+    "late_open": "Смена открыта с опозданием",
+    "not_open": "Смена не открыта",
+}
+
+
 STATES = {
     "on_time": "Смена открыта вовремя.", "late_open": "Смена открыта с опозданием.",
     "not_open": "В iiko нет открытия смены за сегодня.", "waiting": "Ожидается время проверки смены.",
@@ -52,7 +58,7 @@ STATES = {
 
 
 def letter(point: dict, state: dict, now: datetime, kind: str, note: str = "") -> tuple[str, str]:
-    title = "Смена не открыта" if kind == "auto" else "Статус открытия"
+    title = AUTO_ALERT_TITLES[state["status"]] if kind == "auto" else "Статус открытия"
     lines = [title, "", f"Точка: {point['name']}", f"Дата: {now:%d.%m.%Y} (МСК)",
              f"Открытие по графику: {clock_label(state.get('deadline'))}",
              f"Фактическое открытие: {clock_label(state.get('opened_at'))}", "",
@@ -193,6 +199,7 @@ class Service:
             return False
         fingerprint = revision(point, server, prefs)
         if not force and previous and previous.get("revision") == fingerprint and previous["status"] in ("on_time", "late_open"):
+            self._queue_auto(point, previous, now)
             return False
         try:
             client = await self._client(server)
@@ -224,7 +231,7 @@ class Service:
 
     def _queue_auto(self, point: dict, state: dict, now: datetime):
         status = state["status"]
-        if status != "not_open":
+        if status not in AUTO_ALERT_TITLES:
             return
         recipients = self.db.targets(point["id"])
         if recipients:
@@ -328,22 +335,22 @@ class Service:
                 raise InputError("Отправьте тестовое письмо на адрес подключённого ящика IMAP.")
             return await asyncio.to_thread(self.mailbox.contains, config, password, job["message_id"])
 
-    def _auto_valid(self, job: dict, now: datetime) -> bool:
+    def _auto_state(self, job: dict, now: datetime) -> dict | None:
         prefs = self.db.preferences()
-        if (job["kind"] != "auto" or job["outcome"] != "not_open" or not prefs["enabled"]
+        if (job["kind"] != "auto" or job["outcome"] not in AUTO_ALERT_TITLES or not prefs["enabled"]
                 or job["day"] != now.date().isoformat()):
-            return False
+            return None
         point = self.db.get("points", job["point"])
         if not point or not point["active"]:
-            return False
+            return None
         server = self.db.get("servers", point["server"])
         if not server or job["revision"] != revision(point, server, prefs):
-            return False
+            return None
         state = self.db.checks(job["day"]).get(point["id"], {})
-        if state.get("status") != "not_open" or state.get("revision") != job["revision"]:
-            return False
+        if state.get("status") not in AUTO_ALERT_TITLES or state.get("revision") != job["revision"]:
+            return None
         check_at = datetime.fromisoformat(state["deadline"]) + SHIFT_CHECK_DELAY
-        return check_at <= min(now, datetime.fromisoformat(state["checked_at"]))
+        return state if check_at <= min(now, datetime.fromisoformat(state["checked_at"])) else None
 
     async def deliver(self):
         async with self._smtp_lock:
@@ -355,14 +362,20 @@ class Service:
                                             for contact in self.db.targets(job["point"])):
                     self.db.finish(job["id"], "cancelled", job["attempts"], error="Получатель больше не закреплён за точкой.")
                     continue
-                if job["kind"] in ("auto", "followup") and not self._auto_valid(job, now):
-                    self.db.finish(job["id"], "cancelled", job["attempts"], error="Условия отправки изменились.")
-                    continue
+                subject, body = job["subject"], job["body"]
+                if job["kind"] in ("auto", "followup"):
+                    state = self._auto_state(job, now)
+                    if state is None:
+                        self.db.finish(job["id"], "cancelled", job["attempts"], error="Условия отправки изменились.")
+                        continue
+                    subject, body = letter({"name": job["point_name"]}, state, now, "auto")
+                    if (state["status"], subject, body) != (job["outcome"], job["subject"], job["body"]):
+                        self.db.refresh_letter(job["id"], state["status"], subject, body)
                 attempts = job["attempts"] + 1
                 try:
                     config, password = self._smtp_config()
                     message_id = await asyncio.to_thread(self.mailer.send, config, password, job["recipient"],
-                                                         job["subject"], job["body"], key=job["id"])
+                                                         subject, body, key=job["id"])
                 except (MailError, InputError) as error:
                     temporary = isinstance(error, MailError) and error.retryable and attempts < 3 and job["kind"] != "test"
                     retry = stamp(now + timedelta(minutes=attempts)) if temporary else None

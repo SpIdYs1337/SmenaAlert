@@ -97,7 +97,7 @@ def seed(service: Service):
                 "status": outcome, "deadline": stamp(planned), "opened_at": stamp(actual) if actual else None,
                 "checked_at": stamp(planned + timedelta(minutes=25)),
             })
-        if status == "not_open":
+        if status in ("late_open", "not_open"):
             service._queue_auto(db.get("points", point_id), checked, now)
     for job in db.queued(stamp(now)):
         db.finish(job["id"], "sent", 1, delivered_at=stamp(now))

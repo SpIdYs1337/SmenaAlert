@@ -458,7 +458,7 @@ function monitorPage() {
       <form class="card-body stack" data-form="monitor">
         <div class="error-box" data-error role="alert"></div>
         <label class="check check-block"><input name="enabled" type="checkbox" ${checked(options.enabled)}>
-          <span><strong>Отправлять автоматически</strong><small>Письмо получают назначенные сотрудники, если на момент проверки в iiko нет открытия смены.</small></span></label>
+          <span><strong>Отправлять автоматически</strong><small>Письмо об опоздании или отсутствии смены получают закреплённые ответственные.</small></span></label>
         ${ready ? "" : `<p class="notice">Для включения добавьте SMTP, активную точку и её получателей.</p>`}
         <p class="notice">Запрос смены доступен через 15 минут после открытия по графику.</p>
         <div class="field-grid">

@@ -198,6 +198,11 @@ class Database:
             db.execute("UPDATE deliveries SET status=?,attempts=?,error=?,retry_at=?,delivered_at=?,message_id=? WHERE id=?",
                        (status, attempts, error, retry_at, delivered_at, message_id, job_id))
 
+    def refresh_letter(self, job_id: int, outcome: str, subject: str, body: str):
+        with self.connection() as db:
+            db.execute("UPDATE deliveries SET outcome=?,subject=?,body=? WHERE id=? AND status='queued'",
+                       (outcome, subject, body, job_id))
+
     def retry(self, job_id: int) -> bool:
         with self.connection() as db:
             return bool(db.execute("UPDATE deliveries SET status='queued',retry_at=NULL,error=NULL "

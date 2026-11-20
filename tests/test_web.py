@@ -334,11 +334,13 @@ class WebPanelTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/statistics?days=91").status_code, 400)
         self.assertEqual(self.client.get("/api/statistics/day/2026-11-19").status_code, 400)
 
-    def test_check_waits_fifteen_minutes_and_only_missing_shift_notifies(self):
+    def test_check_waits_fifteen_minutes_and_sends_both_alerts_to_their_assignees(self):
         server = self.configure()
         person = self.add_person("Анна", "anna@example.org")
+        other = self.add_person("Ольга", "olga@example.org")
+        self.add_person("Без назначения", "unassigned@example.org")
         timely = self.point(server, "Вовремя", [person], 1)
-        late = self.point(server, "Поздно", [person], 2)
+        late = self.point(server, "Поздно", [other], 2)
         missing = self.point(server, "Закрыта", [person], 3)
         self.write("PUT", "/monitor", {"enabled": True, "inclusive": True})
         self.db.save_setting("monitor", {**self.db.preferences(), "delay_seconds": 3000})
@@ -357,8 +359,12 @@ class WebPanelTests(unittest.TestCase):
         self.assertEqual(checks[timely]["status"], "on_time")
         self.assertEqual(checks[late]["status"], "late_open")
         self.assertEqual(checks[missing]["status"], "not_open")
-        self.assertEqual(len(self.smtp.messages), 1)
-        self.assertIn("Закрыта", self.smtp.messages[0][1])
+        self.assertEqual(len(self.smtp.messages), 2)
+        messages = {email: (subject, body) for email, subject, body, _ in self.smtp.messages}
+        self.assertEqual(set(messages), {"anna@example.org", "olga@example.org"})
+        self.assertIn("Смена не открыта · Закрыта", messages["anna@example.org"][0])
+        self.assertIn("Смена открыта с опозданием · Поздно", messages["olga@example.org"][0])
+        self.assertIn("09:07:00", messages["olga@example.org"][1])
 
     def test_manual_and_connection_checks_before_cutoff_do_not_read_shifts(self):
         server = self.configure()
@@ -373,7 +379,7 @@ class WebPanelTests(unittest.TestCase):
         self.assertEqual(self.write("POST", "/check", {"point": point})["checked"], 1)
         self.assertEqual(self.shift_requests, ["Арбат"])
 
-    def test_queued_letter_is_cancelled_if_a_shift_opens_before_sending(self):
+    def test_queued_letter_is_cancelled_if_timely_opening_is_confirmed_before_sending(self):
         server = self.configure()
         person = self.add_person("Анна", "anna@example.org")
         self.point(server, "Арбат", [person], 1)
@@ -386,8 +392,49 @@ class WebPanelTests(unittest.TestCase):
             {**job, "event_key": job["event_key"] + "/followup", "kind": "followup", "outcome": "late_open"},
         ])
         self.current = self.current.replace(minute=16)
-        self.shifts["Арбат"] = [Shift(1, self.current)]
+        self.shifts["Арбат"] = [Shift(1, self.current.replace(hour=8, minute=59))]
         asyncio.run(self.service.check(force=True))
         asyncio.run(self.service.deliver())
         self.assertEqual(self.smtp.messages, [])
         self.assertEqual([item["status"] for item in self.db.history()], ["cancelled"] * 3)
+
+    def test_queued_alert_uses_latest_opening_on_smtp_retry(self):
+        server = self.configure()
+        person = self.add_person("Анна", "anna@example.org")
+        self.point(server, "Арбат", [person], 1)
+        self.write("PUT", "/monitor", {"enabled": True})
+        self.current = self.current.replace(minute=15)
+        self.smtp.rejected.add("anna@example.org")
+        asyncio.run(self.service.check())
+        asyncio.run(self.service.deliver())
+        job_id = self.db.history()[0]["id"]
+        self.assertEqual(self.db.delivery(job_id)["outcome"], "not_open")
+        self.assertEqual(self.db.delivery(job_id)["status"], "queued")
+
+        self.current = self.current.replace(minute=16)
+        self.shifts["Арбат"] = [Shift(1, self.current.replace(minute=15, second=30))]
+        self.smtp.rejected.clear()
+        for _ in range(2):
+            asyncio.run(self.service.check())
+            asyncio.run(self.service.deliver())
+        self.assertEqual(len(self.smtp.messages), 1)
+        self.assertIn("Смена открыта с опозданием", self.smtp.messages[0][1])
+        self.assertIn("09:15:30", self.smtp.messages[0][2])
+        self.assertEqual(len(self.db.history()), 1)
+        job = self.db.delivery(job_id)
+        self.assertEqual((job["status"], job["outcome"], job["attempts"]), ("sent", "late_open", 2))
+
+    def test_previously_confirmed_late_opening_can_alert_without_another_iiko_request(self):
+        server = self.configure()
+        person = self.add_person("Анна", "anna@example.org")
+        self.point(server, "Арбат", [person], 1)
+        self.current = self.current.replace(minute=15)
+        self.shifts["Арбат"] = [Shift(1, self.current.replace(minute=7))]
+        self.assertEqual(asyncio.run(self.service.check(force=True)), 1)
+        self.assertEqual(self.db.history(), [])
+        self.write("PUT", "/monitor", {"enabled": True})
+        self.assertEqual(asyncio.run(self.service.check()), 0)
+        asyncio.run(self.service.deliver())
+        self.assertEqual(self.shift_requests, ["Арбат"])
+        self.assertEqual(len(self.smtp.messages), 1)
+        self.assertIn("Смена открыта с опозданием", self.smtp.messages[0][1])
