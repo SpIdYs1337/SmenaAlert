@@ -7,7 +7,8 @@ CREATE TABLE IF NOT EXISTS employees (
     active INTEGER NOT NULL DEFAULT 1,
     password_hash TEXT NOT NULL,
     must_change INTEGER NOT NULL DEFAULT 1,
-    version INTEGER NOT NULL DEFAULT 1
+    version INTEGER NOT NULL DEFAULT 1,
+    login_enabled INTEGER NOT NULL DEFAULT 1 CHECK(login_enabled IN (0,1))
 );
 CREATE TABLE IF NOT EXISTS articles (
     id TEXT PRIMARY KEY,
@@ -16,7 +17,9 @@ CREATE TABLE IF NOT EXISTS articles (
     body TEXT NOT NULL,
     version INTEGER NOT NULL DEFAULT 1,
     edited_at TEXT NOT NULL,
-    edited_by TEXT NOT NULL
+    edited_by TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'article' CHECK(kind IN ('section','article')),
+    html TEXT
 );
 CREATE INDEX IF NOT EXISTS articles_parent ON articles(parent);
 CREATE TABLE IF NOT EXISTS documents (
@@ -29,19 +32,20 @@ CREATE TABLE IF NOT EXISTS assets (
     tag TEXT NOT NULL,
     tag_key TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
-    serial TEXT NOT NULL
+    serial TEXT NOT NULL,
+    service_months INTEGER CHECK(service_months BETWEEN 1 AND 600),
+    service_revision INTEGER NOT NULL DEFAULT 0
 );
-CREATE TABLE IF NOT EXISTS asset_events (
-    id INTEGER PRIMARY KEY,
-    asset TEXT NOT NULL REFERENCES assets(id),
-    action TEXT NOT NULL CHECK(action IN ('receive','commission','assign','transfer','return')),
-    state TEXT NOT NULL CHECK(state IN ('stock','in_use')),
-    employee TEXT REFERENCES employees(id),
-    employee_name TEXT NOT NULL,
-    day TEXT NOT NULL,
-    recorded_at TEXT NOT NULL,
-    actor TEXT NOT NULL,
-    actor_name TEXT NOT NULL,
-    note TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS article_media (
+    id TEXT PRIMARY KEY,
+    article TEXT NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    mime TEXT NOT NULL,
+    seconds REAL,
+    content BLOB NOT NULL
 );
-CREATE INDEX IF NOT EXISTS asset_events_asset ON asset_events(asset,id);
+CREATE INDEX IF NOT EXISTS article_media_article ON article_media(article);
+CREATE TABLE IF NOT EXISTS asset_photos (
+    asset TEXT PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
+    content BLOB NOT NULL
+);

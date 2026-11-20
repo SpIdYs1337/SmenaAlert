@@ -119,8 +119,13 @@ def seed_workspace(service):
     for name, login, grants in team:
         assignees.append(accounts.save({"name": name, "login": login, "password": token_urlsafe(18), "grants": grants},
                                        author["id"]))
+    directory_employee = accounts.save({"name": "Ольга Соловьёва"}, author["id"])
     knowledge = Knowledge(service.db)
-    root = knowledge.save({"title": "IT", "body": "Инструкции по оборудованию торговых точек."}, stamp(now), author["name"])
+    root = knowledge.save({"title": "Оборудование", "kind": "section"}, stamp(now), author["name"])
+    knowledge.save({"title": "Подготовка к выдаче", "parent": root,
+                    "html": "<h2>Перед выдачей</h2><ul><li>Проверьте комплектность.</li>"
+                            "<li>Сверьте серийный номер с карточкой устройства.</li></ul>"},
+                   stamp(now), author["name"])
     knowledge.import_file("Выдача ноутбука.md", (
         "# Приёмка\nПроверьте комплектность устройства.\n## Сверка серийного номера\n"
         "Сверьте номер на корпусе с накладной.\n# Выдача сотруднику\nВыберите устройство, сотрудника и дату выдачи."
@@ -130,4 +135,9 @@ def seed_workspace(service):
     laptop = inventory.receive({"tag": "IT-014", "name": "Ноутбук", "serial": "DEMO-014", "day": received}, now, author)
     inventory.receive({"tag": "IT-015", "name": "Монитор", "day": received}, now, author)
     inventory.move(laptop, {"action": "assign", "employee": assignees[0], "day": now.date().isoformat(),
-                            "version": inventory.details(laptop)["version"]}, now, author)
+                            "service_months": 36, "location": "IT-отдел", "version": inventory.details(laptop, now.date())["version"]}, now, author)
+    for tag, name, age in (("IT-016", "Сканер", 24), ("IT-017", "Терминал склада", 45)):
+        day = (now.date() - timedelta(days=age)).isoformat()
+        asset = inventory.receive({"tag": tag, "name": name, "day": day}, now, author)
+        inventory.move(asset, {"action": "assign", "employee": directory_employee, "day": day,
+                               "service_months": 1, "location": "Торговая точка", "version": inventory.details(asset, now.date())["version"]}, now, author)

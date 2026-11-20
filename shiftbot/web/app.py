@@ -15,7 +15,8 @@ from .. import __version__
 from ..config import ConfigError, MSK
 from ..iiko import IikoError
 from .access import Accounts
-from .knowledge import DOCUMENT_LIMIT
+from .knowledge import DOCUMENT_LIMIT, KNOWLEDGE_JSON_LIMIT, MAX_MEDIA
+from .media import ARTICLE_REQUEST_LIMIT, PHOTO_REQUEST_LIMIT
 from .workspace import request_data, workspace_api
 from .mail import MailError
 from .service import Service, can_check_receipt
@@ -29,7 +30,7 @@ def same(left: str, right: str) -> bool:
 
 def create_app(service: Service, *, admin: str, password: str, secure_cookie=False, demo=False) -> Flask:
     app = Flask(__name__)
-    app.jinja_env.globals.update(panel_name="iiko-Контроль смены", panel_version=__version__)
+    app.jinja_env.globals.update(panel_name="Uppetit IT", panel_version=__version__)
     app.secret_key = service.vault.session_key(admin, password)
     app.config.update(SESSION_COOKIE_NAME="shift_monitor", SESSION_COOKIE_HTTPONLY=True,
                       SESSION_COOKIE_SAMESITE="Strict", SESSION_COOKIE_SECURE=secure_cookie,
@@ -48,7 +49,7 @@ def create_app(service: Service, *, admin: str, password: str, secure_cookie=Fal
         if demo or session.get("admin") == admin:
             return accounts.owner
         user = accounts.get(session["employee"]) if session.get("employee") else None
-        if user and user["active"] and session.get("version") == user["version"]:
+        if user and user["active"] and user["login_enabled"] and session.get("version") == user["version"]:
             return user
         return None
 
@@ -56,6 +57,13 @@ def create_app(service: Service, *, admin: str, password: str, secure_cookie=Fal
     def require_access():
         if request.endpoint == "work.article_import":
             request.max_content_length = DOCUMENT_LIMIT + 128 * 1024
+        elif request.endpoint == "work.article_save":
+            request.max_content_length = (ARTICLE_REQUEST_LIMIT if request.mimetype == "multipart/form-data"
+                                          else KNOWLEDGE_JSON_LIMIT)
+            request.max_form_memory_size = KNOWLEDGE_JSON_LIMIT
+            request.max_form_parts = MAX_MEDIA + 1
+        elif request.endpoint in {"work.receive", "work.update_photo"} and request.mimetype == "multipart/form-data":
+            request.max_content_length = PHOTO_REQUEST_LIMIT
         if request.endpoint in {"login", "static", "health"}:
             return
         g.user = identity()
@@ -80,7 +88,8 @@ def create_app(service: Service, *, admin: str, password: str, secure_cookie=Fal
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "same-origin"
         response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:"
+            "default-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; "
+            "img-src 'self' data: blob:; media-src 'self' blob:"
         )
         if request.endpoint != "static":
             response.headers["Cache-Control"] = "no-store"

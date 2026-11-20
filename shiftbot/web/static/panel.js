@@ -158,8 +158,7 @@ function render() {
     else link.removeAttribute("aria-current");
   }
   for (const shortcut of section.querySelectorAll("[data-action]")) {
-    shortcut.disabled = work.page !== ui.page || !work.data ||
-      shortcut.dataset.action === "work-move-selected" && !work.asset;
+    shortcut.disabled = work.page !== ui.page || !work.data;
   }
   const mode = document.querySelector("#mode");
   if (mode) {
@@ -515,7 +514,8 @@ function monitorPage() {
 }
 
 function drawerView(title, hint, body, options = {}) {
-  const {form = "", id, submit, extra = ""} = options;
+  const {form = "", id, submit, extra = "", wide = false} = options;
+  drawer.classList.toggle("document-drawer", wide);
   drawer.innerHTML = `<form class="drawer-form" data-form="${form}" data-id="${esc(id)}">
     <header class="drawer-head"><div><h2 id="drawer-title">${esc(title)}</h2>${hint ? `<p>${esc(hint)}</p>` : ""}</div>
       ${iconButton("drawer-close", "Закрыть", "close", "")}</header>

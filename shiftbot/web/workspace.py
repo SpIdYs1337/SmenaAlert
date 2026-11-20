@@ -1,6 +1,7 @@
 """Authenticated HTTP endpoints for the knowledge base, inventory and administration."""
 from __future__ import annotations
 
+import json
 from functools import wraps
 from io import BytesIO
 
@@ -8,8 +9,9 @@ from flask import Blueprint, abort, g, jsonify, request, send_file
 
 from ..config import MSK
 from .access import PERMISSIONS
-from .inventory import ACTIONS, STATES, Inventory
-from .knowledge import DOCUMENT_LIMIT, Knowledge
+from .inventory import ACTIONS, SERVICE_WARNING_DAYS, STATES, Inventory
+from .knowledge import DOCUMENT_LIMIT, MAX_MEDIA, MEDIA_ID, Knowledge
+from .media import article_media, photo_content
 from .settings import InputError
 
 
@@ -18,6 +20,26 @@ def request_data():
     if not isinstance(value, dict):
         raise InputError("Не удалось прочитать данные формы.")
     return value
+
+
+def uploaded_article():
+    if request.mimetype != "multipart/form-data":
+        return request_data(), {}
+    try:
+        data = json.loads(request.form.get("record", ""))
+    except (ValueError, RecursionError):
+        raise InputError("Не удалось прочитать статью.") from None
+    if not isinstance(data, dict):
+        raise InputError("Не удалось прочитать статью.")
+    if len(request.files) > MAX_MEDIA:
+        raise InputError("К статье можно прикрепить до 12 файлов.")
+    uploads = {}
+    for key, files in request.files.lists():
+        prefix, _, item = key.partition(":")
+        if prefix != "media" or not MEDIA_ID.fullmatch(item) or len(files) != 1 or not files[0].filename:
+            raise InputError("Проверьте вложения статьи.")
+        uploads[item] = article_media(files[0])
+    return data, uploads
 
 
 def requires(grant):
@@ -41,7 +63,7 @@ def workspace_api(service, accounts):
     @api.get("/profile")
     def profile():
         person = g.user
-        assigned = inventory.assets(person["id"]) if "inventory.read" in person["grants"] else []
+        assigned = inventory.assets(now().date(), person["id"]) if "inventory.read" in person["grants"] else []
         return jsonify(person=person, permissions=PERMISSIONS, assigned=assigned)
 
     @api.get("/employees")
@@ -70,7 +92,8 @@ def workspace_api(service, accounts):
     @api.put("/knowledge/<item>")
     @requires("knowledge.write")
     def article_save(item=None):
-        saved = knowledge.save(request_data(), now().isoformat(timespec="seconds"), g.user["name"], item)
+        data, uploads = uploaded_article()
+        saved = knowledge.save(data, now().isoformat(timespec="seconds"), g.user["name"], item, uploads)
         return jsonify(id=saved), 200 if item else 201
 
     @api.post("/knowledge/import")
@@ -93,10 +116,20 @@ def workspace_api(service, accounts):
         return send_file(BytesIO(row["content"]), download_name=row["name"], as_attachment=True,
                          mimetype="application/octet-stream")
 
+    @api.get("/knowledge/<item>/media/<media>")
+    @requires("knowledge.read")
+    def read_media(item, media):
+        file = knowledge.media(item, media)
+        if not file:
+            abort(404)
+        return send_file(BytesIO(file["content"]), mimetype=file["mime"], conditional=True)
+
     @api.get("/inventory")
     @requires("inventory.read")
     def assets():
-        return jsonify(items=inventory.assets(request.args.get("employee")), states=STATES, actions=ACTIONS, today=now().date().isoformat())
+        today = now().date()
+        return jsonify(items=inventory.assets(today, request.args.get("employee")), states=STATES, actions=ACTIONS,
+                       today=today.isoformat(), service_warning_days=SERVICE_WARNING_DAYS)
 
     @api.get("/inventory/assignees")
     @requires("inventory.write")
@@ -106,17 +139,53 @@ def workspace_api(service, accounts):
     @api.get("/inventory/<item>")
     @requires("inventory.read")
     def asset(item):
-        return jsonify(inventory.details(item) or abort(404))
+        return jsonify(inventory.details(item, now().date()) or abort(404))
 
     @api.post("/inventory")
     @requires("inventory.write")
     def receive():
-        return jsonify(id=inventory.receive(request_data(), now(), g.user)), 201
+        photo = None
+        if request.mimetype == "multipart/form-data":
+            data = request.form
+            upload = request.files.get("photo")
+            if upload and upload.filename:
+                photo = photo_content(upload)
+        else:
+            data = request_data()
+        return jsonify(id=inventory.receive(data, now(), g.user, photo)), 201
 
     @api.post("/inventory/<item>/events")
     @requires("inventory.write")
     def move(item):
         inventory.move(item, request_data(), now(), g.user)
         return jsonify(id=item), 201
+
+    @api.put("/inventory/<item>/service")
+    @requires("inventory.write")
+    def update_service(item):
+        inventory.save_term(item, request_data())
+        return jsonify(id=item)
+
+    @api.get("/inventory/<item>/photo")
+    @requires("inventory.read")
+    def asset_photo(item):
+        file = inventory.photo(item)
+        if file is None:
+            abort(404)
+        return send_file(BytesIO(file), mimetype="image/webp")
+
+    @api.put("/inventory/<item>/photo")
+    @api.delete("/inventory/<item>/photo")
+    @requires("inventory.write")
+    def update_photo(item):
+        photo = None
+        if request.method == "PUT":
+            upload = request.files.get("photo")
+            if not upload or not upload.filename:
+                raise InputError("Выберите фото устройства.")
+            photo = photo_content(upload)
+        if not inventory.save_photo(item, photo):
+            abort(404)
+        return jsonify(id=item)
 
     return api

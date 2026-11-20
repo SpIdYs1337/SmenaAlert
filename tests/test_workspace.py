@@ -1,5 +1,8 @@
 import io
 import re
+import json
+import shutil
+import subprocess
 import sqlite3
 import tempfile
 import unittest
@@ -11,6 +14,8 @@ try:
     import flask
 except ImportError as error:
     raise unittest.SkipTest("Install requirements-web.txt to test the panel.") from error
+
+from PIL import Image
 
 from shiftbot.config import MSK
 from shiftbot.web.app import create_app
@@ -110,7 +115,7 @@ class WorkspaceTests(unittest.TestCase):
             path = "/api/work/inventory/" + item
             version = self.owner.get(path).json["version"]
             self.write("inventory/" + item + "/events", {"action": "assign", "employee": employee,
-                       "day": "2026-11-20", "version": version})
+                       "day": "2026-11-20", "version": version, "service_months": 36})
         user, _ = self.activate("first")
         profile = user.get("/api/work/profile", query_string={"employee": second}).json
         self.assertEqual(profile["person"]["id"], first)
@@ -220,7 +225,7 @@ class WorkspaceTests(unittest.TestCase):
         for action, employee, day in (("commission", None, "2026-11-17"), ("assign", first, "2026-11-18"),
                                       ("transfer", second, "2026-11-19"), ("return", None, "2026-11-20")):
             version = details()["version"]
-            data = {"action":action,"employee":employee,"day":day,"version":version}
+            data = {"action":action,"employee":employee,"day":day,"version":version, "service_months": 12}
             self.write(path+"/events", data, client=user, token=token)
             self.write(path+"/events", data, client=user, token=token, expect=400)
         events = details()["events"]
@@ -251,7 +256,8 @@ class WorkspaceTests(unittest.TestCase):
         path = "inventory/" + asset
         def version():
             return self.owner.get("/api/work/" + path).json["version"]
-        self.write(path + "/events", {"action": "assign", "employee": employee, "version": version(), "day": "2026-11-20"})
+        self.write(path + "/events", {"action": "assign", "employee": employee, "version": version(), "day": "2026-11-20",
+                                      "service_months": 12})
         held = self.owner.get("/api/work/inventory", query_string={"employee": employee}).json["items"]
         self.assertEqual([item["id"] for item in held], [asset])
         entry = self.owner.get("/api/work/employees").json["items"][0]
@@ -262,6 +268,141 @@ class WorkspaceTests(unittest.TestCase):
                                       "day": "2026-11-20"}, expect=400)
         events = self.owner.get("/api/work/" + path).json["events"]
         self.assertEqual(events[1]["employee_name"], "engineer")
+
+    def test_directory_employee_can_hold_equipment_without_an_account(self):
+        employee = self.write("employees", {"name": "Сотрудник склада"})["id"]
+        self.assertEqual(self.owner.get("/api/work/inventory/assignees").json["items"][0]["id"], employee)
+        entry = self.owner.get("/api/work/employees").json["items"][0]
+        self.assertEqual((entry["login"], entry["login_enabled"], entry["grants"]), ("", False, []))
+        item = self.write("inventory", {"name": "Сканер", "tag": "DIR-1", "day": "2026-10-28"})["id"]
+        path = "inventory/" + item
+        version = self.owner.get("/api/work/" + path).json["version"]
+        self.write(path + "/events", {"version": version, "day": "2026-10-28", "action": "assign", "employee": employee,
+                                      "service_months": 12})
+        enabled = {**entry, "login_enabled": True, "login": "warehouse", "grants": ["knowledge.read"]}
+        self.write("employees/" + employee, enabled, method="PUT", expect=400)
+        self.write("employees/" + employee, {**enabled, "password": "temporary-code-123"}, method="PUT", expect=200)
+        user, _ = self.activate("warehouse")
+        active = self.owner.get("/api/work/employees").json["items"][0]
+        self.write("employees/" + employee, {**active, "login_enabled": False}, method="PUT", expect=200)
+        self.assertEqual(user.get("/api/work/profile").status_code, 401)
+        self.assertEqual(self.login(self.app.test_client(), "warehouse", "personal-code-456").status_code, 401)
+        self.assertEqual(self.owner.get("/api/work/" + path).json["events"][0]["employee"], employee)
+        self.assertEqual(self.owner.get("/api/work/inventory/assignees").json["items"][0]["id"], employee)
+
+    def test_service_dates_warning_filter_data_and_commission_required(self):
+        for start, end, status in (
+            ("2026-01-31", "2026-02-28", "expired"),
+            ("2026-10-20", "2026-11-20", "today"),
+            ("2026-10-30", "2026-11-30", "soon"),
+            ("2026-11-20", "2026-12-20", "soon"),
+        ):
+            with self.subTest(start=start):
+                item = self.write("inventory", {"name": "Терминал", "tag": start, "day": start})["id"]
+                path = "inventory/" + item
+                row = self.owner.get("/api/work/" + path).json
+                self.assertEqual(row["service_status"], "not_started")
+                movement = {"version": row["version"], "day": start, "action": "commission"}
+                self.write(path + "/events", movement, expect=400)
+                self.write(path + "/events", {**movement, "service_months": 1})
+                row = self.owner.get("/api/work/" + path).json
+                self.assertEqual((row["service_started_on"], row["service_expires_on"], row["service_status"]),
+                                 (start, end, status))
+                edit = {"service_revision": row["service_revision"], "service_months": 24}
+                self.write(path + "/service", edit, method="PUT", expect=200)
+                self.write(path + "/service", edit, method="PUT", expect=400)
+                self.assertEqual(self.owner.get("/api/work/" + path).json["service_status"], "valid")
+
+    def test_device_location_history_relocates_without_reassigning(self):
+        employee = self.write("employees", {"name":"Сотрудник склада"})["id"]
+        device = self.write("inventory", {"tag":"MOVE-17", "name":"Терминал", "day":"2026-11-01",
+                                          "location":"Приёмный склад", "note":"Накладная 17"})["id"]
+        path = "inventory/" + device
+
+        def record(action, day, place, expect=201, **details):
+            row = self.owner.get("/api/work/" + path).json
+            self.write(path + "/events", {"version":row["version"], "action":action, "day":day, "location":place,
+                                          **details}, expect=expect)
+
+        record("relocate", "2026-11-02", "Стеллаж №1")
+        record("assign", "2026-11-03", "Стойка 1", employee=employee, service_months=36)
+        record("relocate", "2026-11-04", "стойка 1", expect=400)
+        record("relocate", "2026-11-04", "Стойка 2")
+        detail = self.owner.get("/api/work/" + path).json
+        self.assertEqual(detail["events"][0]["employee"], employee)
+        self.assertEqual(detail["service_started_on"], "2026-11-03")
+        self.assertEqual([event["location"] for event in reversed(detail["events"])],
+                         ["Приёмный склад", "Стеллаж №1", "Стойка 1", "Стойка 2"])
+        self.assertEqual(detail["events"][-1]["note"], "Накладная 17")
+        record("return", "2026-11-05", "")
+        detail = self.owner.get("/api/work/" + path).json
+        self.assertIsNone(detail["events"][0]["employee"])
+        self.assertEqual((detail["events"][0]["location"], detail["service_months"]), ("Склад",36))
+
+    @staticmethod
+    def sample_photo():
+        raw = io.BytesIO()
+        Image.new("RGB", (60, 30), color="#29483d").save(raw, format="PNG")
+        return raw.getvalue()
+
+    def send_files(self, path, fields, *, method="POST", expect=201):
+        result = self.owner.open("/api/work/" + path, data=fields, method=method, content_type="multipart/form-data",
+                                 headers={"X-CSRF-Token": self.token})
+        self.assertEqual(result.status_code, expect, result.get_data(as_text=True))
+        return result.json
+
+    def test_asset_optional_photo_is_scoped_and_validated(self):
+        fields = {"name": "Стойка", "tag": "PHOTO-1", "day": "2026-11-20"}
+        self.send_files("inventory", {**fields, "photo": (io.BytesIO(b"<svg></svg>"), "photo.png")}, expect=400)
+        item = self.send_files("inventory", {**fields, "photo": (io.BytesIO(self.sample_photo()), "photo.png")})["id"]
+        path = f"/api/work/inventory/{item}/photo"
+        response = self.owner.get(path)
+        self.assertEqual(response.mimetype, "image/webp")
+        self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
+        self.assertEqual(self.app.test_client().get(path).status_code, 401)
+        self.staff("documents")
+        user, _ = self.activate("documents")
+        self.assertEqual(user.get(path).status_code, 403)
+        self.write("inventory/" + item + "/photo", {}, method="DELETE", expect=200)
+        self.assertEqual(self.owner.get(path).status_code, 404)
+
+    def test_article_editor_persists_clean_markup_and_media_atomically(self):
+        parent = self.write("knowledge", {"title": "Памятки", "kind": "section"})["id"]
+        self.write("knowledge", {"kind": "section", "title": "Ошибка", "body": "Текст"}, expect=400)
+        media = "abc00000a123eeee"
+        raw = (f'<h2>Техника</h2><p><strong>Шаг</strong><a href="javascript:alert(1)">ссылка</a>'
+               f'<script>alert(1)</script></p><figure data-media="{media}"></figure>')
+        entry = {"title":"Приёмка", "kind":"article", "parent":parent, "html":raw}
+        self.write("knowledge", entry, expect=400)
+        fields = {"record": json.dumps(entry), "media:" + media: (io.BytesIO(self.sample_photo()), "photo.png")}
+        item = self.send_files("knowledge", fields)["id"]
+        path = "knowledge/" + item
+        data = self.owner.get("/api/work/" + path).json
+        self.assertEqual((data["kind"], data["parent"]), ("article", parent))
+        self.assertIn("<strong>Шаг</strong>", data["html"])
+        self.assertNotIn("javascript", data["html"])
+        self.assertNotIn("alert(1)", data["html"])
+        self.assertEqual(data["media"][0]["id"], media)
+        self.assertEqual(self.owner.get("/api/work/" + path + "/media/" + media).mimetype, "image/webp")
+        self.assertEqual(self.owner.get(f"/api/work/knowledge/{parent}/media/{media}").status_code,404)
+        self.write(path, {**entry, "version":1, "html":"<p>Новая редакция</p>"}, method="PUT", expect=200)
+        self.assertEqual(self.owner.get("/api/work/" + path + "/media/" + media).status_code,404)
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is needed for real videos")
+    def test_video_duration_is_validated_on_the_server_and_streams_by_range(self):
+        def clip(seconds):
+            return subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", f"color=c=black:s=64x64:r=4:d={seconds}",
+                                   "-an", "-c:v", "libx264", "-threads", "1", "-movflags", "frag_keyframe+empty_moov",
+                                   "-f", "mp4", "pipe:1"], timeout=15, capture_output=True, check=True).stdout
+        media = "aa0aa000a123eeee"
+        article = json.dumps({"title": "Видео", "html": f'<figure data-media="{media}"></figure>'})
+        fields = {"record": article, "media:" + media: (io.BytesIO(clip(21)), "guide.mp4")}
+        self.send_files("knowledge", fields, expect=400)
+        self.assertEqual(self.owner.get("/api/work/knowledge").json["items"], [])
+        raw = clip(20)
+        item = self.send_files("knowledge", {**fields, "media:" + media: (io.BytesIO(raw), "guide.mp4")})["id"]
+        response = self.owner.get(f"/api/work/knowledge/{item}/media/{media}", headers={"Range":"bytes=16-47"})
+        self.assertEqual((response.status_code, response.mimetype, response.data), (206, "video/mp4", raw[16:48]))
 
     def test_upgrade_keeps_legacy_monitor_volume_and_is_repeatable(self):
         with tempfile.TemporaryDirectory() as directory:

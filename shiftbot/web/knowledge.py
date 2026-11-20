@@ -6,13 +6,22 @@ import re
 import subprocess
 import tempfile
 import zipfile
+from html.parser import HTMLParser
 from pathlib import Path
 from xml.etree import ElementTree as ET
+
+import nh3
 
 from .settings import InputError, identifier, number, text
 
 DOCUMENT_LIMIT = 5 * 1024 * 1024
 MAX_TEXT = 180_000
+KNOWLEDGE_JSON_LIMIT = 2 * 1024 * 1024
+MAX_MEDIA = 12
+MAX_MEDIA_BYTES = 64 * 1024 * 1024
+MEDIA_ID = re.compile(r"[0-9a-f]{16}")
+BLOCKS = {"p", "div", "h2", "h3", "h4", "blockquote", "ul", "ol", "li", "figure", "pre", "br", "hr"}
+EDITOR_TAGS = BLOCKS | {"strong", "b", "em", "i", "u", "s", "strike", "code", "a"}
 MAX_NODES = 300
 MAX_DEPTH = 24
 WORD = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
@@ -30,6 +39,45 @@ def body_text(value):
     if not isinstance(value, str) or len(value) > MAX_TEXT or any(ord(c) < 32 and c not in "\r\n\t" for c in value):
         raise InputError("Проверьте текст статьи. Максимум 180 000 символов.")
     return value.replace("\r\n", "\n").replace("\r", "\n")
+
+
+class ArticleMarkup(HTMLParser):
+    def __init__(self, markup):
+        super().__init__(convert_charrefs=True)
+        self.references = []
+        self.lines = []
+        self.feed(markup)
+        self.close()
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "figure":
+            item = dict(attrs).get("data-media", "")
+            if not MEDIA_ID.fullmatch(item or ""):
+                raise InputError("В статье есть вложение без файла.")
+            self.references.append(item)
+        if tag in {"br", "hr"}:
+            self.lines.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in BLOCKS and self.lines and self.lines[-1] != "\n":
+            self.lines.append("\n")
+
+    def handle_data(self, data):
+        self.lines.append(data)
+
+
+def clean_article(value):
+    if not isinstance(value, str) or len(value) > MAX_TEXT * 2:
+        raise InputError("Текст статьи слишком большой.")
+    html = nh3.clean(
+        value, tags=EDITOR_TAGS, attributes={"a": {"href"}, "figure": {"data-media"}},
+        clean_content_tags={"script", "style", "iframe", "object", "svg", "math", "template", "audio", "video"},
+        url_schemes={"http", "https", "mailto"},
+    )
+    article = ArticleMarkup(html)
+    if len(article.references) > MAX_MEDIA or len(set(article.references)) != len(article.references):
+        raise InputError("В статье может быть до 12 отдельных фото и видео.")
+    return html, body_text("".join(article.lines).strip()), set(article.references)
 
 
 class DocumentXML(ET.TreeBuilder):
@@ -187,13 +235,17 @@ class Knowledge:
 
     def tree(self):
         with self.db.connection() as conn:
-            return [dict(row) for row in conn.execute("SELECT id,parent,title FROM articles ORDER BY rowid")]
+            return [dict(row) for row in conn.execute("SELECT id,parent,title,kind FROM articles ORDER BY rowid")]
 
     def get(self, item):
         with self.db.connection() as conn:
+            conn.execute("BEGIN")
             row = conn.execute("SELECT a.*,d.name AS filename FROM articles a LEFT JOIN documents d ON d.article=a.id "
                                "WHERE a.id=?", (item,)).fetchone()
-        return dict(row) if row else None
+            if not row:
+                return None
+            media = conn.execute("SELECT id,name,mime,seconds FROM article_media WHERE article=? ORDER BY rowid", (item,))
+            return {**dict(row), "media": [dict(file) for file in media]}
 
     @staticmethod
     def check_parent(conn, parent, item=None, height=1):
@@ -209,15 +261,22 @@ class Knowledge:
         if depth + height > MAX_DEPTH:
             raise InputError(f"Допускается до {MAX_DEPTH} уровней вложенности.")
 
-    def save(self, data, now, author, item=None):
+    def save(self, data, now, author, item=None, uploads=None):
         version = number(data.get("version"), "Версия пункта", 1, 2**63-1) if item else None
-        title = text(data, "title", "Название пункта", limit=240)
-        body = body_text(data.get("body", ""))
+        title = text(data, "title", "Название", limit=240)
+        uploads = uploads or {}
+        markup = clean_article(data["html"]) if "html" in data else None
         parent = None
         if data.get("parent") is not None:
             parent = text(data, "parent", "Родительский пункт", required=False) or None
         with self.db.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            previous = conn.execute("SELECT kind,body,html,version FROM articles WHERE id=?", (item,)).fetchone()
+            if item and (not previous or previous["version"] != version):
+                raise InputError("Пункт уже изменился. Откройте свежую версию перед сохранением.")
+            kind = data.get("kind", previous["kind"] if previous else "article")
+            if kind not in ("section", "article") or (previous and kind != previous["kind"]):
+                raise InputError("Выберите раздел или статью при создании.")
             height = 1
             if item:
                 height = conn.execute("""
@@ -225,16 +284,45 @@ class Knowledge:
                         FROM articles a JOIN tree ON a.parent=tree.id) SELECT max(depth) FROM tree
                 """, (item,)).fetchone()[0]
             self.check_parent(conn, parent, item, height)
+
+            references = None
+            if markup is not None:
+                html, body, references = markup
+            elif previous and "body" not in data:
+                html, body = previous["html"], previous["body"]
+            else:
+                html, body, references = None, body_text(data.get("body", "")), set()
+            if kind == "section" and (body or html or uploads):
+                raise InputError("Для текста и медиа создайте статью в разделе.")
+
             if item:
-                updated = conn.execute("UPDATE articles SET parent=?,title=?,body=?,edited_at=?,edited_by=?,version=version+1 "
-                                       "WHERE id=? AND version=?", (parent, title, body, now, author, item, version))
-                if not updated.rowcount:
-                    raise InputError("Пункт уже изменился. Откройте свежую версию перед сохранением.")
+                conn.execute("UPDATE articles SET parent=?,title=?,body=?,html=?,edited_at=?,edited_by=?,version=version+1 "
+                             "WHERE id=?", (parent, title, body, html, now, author, item))
             else:
                 item = identifier()
-                conn.execute("INSERT INTO articles(id,parent,title,body,edited_at,edited_by) VALUES (?,?,?,?,?,?)",
-                             (item, parent, title, body, now, author))
+                conn.execute("INSERT INTO articles(id,parent,title,body,html,kind,edited_at,edited_by) "
+                             "VALUES (?,?,?,?,?,?,?,?)", (item, parent, title, body, html, kind, now, author))
+            if references is not None or uploads:
+                self.save_media(conn, item, references or set(), uploads)
         return item
+
+    @staticmethod
+    def save_media(conn, item, references, uploads):
+        previous = dict(conn.execute("SELECT id,length(content) FROM article_media WHERE article=?", (item,)))
+        if references - previous.keys() != uploads.keys():
+            raise InputError("Часть вложений недоступна. Добавьте файлы в статью заново.")
+        size = sum(previous[key] for key in references & previous.keys()) + sum(len(file.content) for file in uploads.values())
+        if size > MAX_MEDIA_BYTES:
+            raise InputError("Общий размер вложений в статье должен быть не более 64 МБ.")
+        conn.executemany("DELETE FROM article_media WHERE article=? AND id=?",
+                         ((item, key) for key in previous.keys() - references))
+        conn.executemany("INSERT INTO article_media (id,article,name,mime,seconds,content) VALUES (?,?,?,?,?,?)",
+                         ((key, item, f.name, f.mime, f.seconds, f.content) for key, f in uploads.items()))
+
+    def media(self, item, media):
+        with self.db.connection() as conn:
+            return conn.execute("SELECT name,mime,content FROM article_media WHERE article=? AND id=?",
+                                (item, media)).fetchone()
 
     def import_file(self, filename, raw, parent, now, author):
         filename, entries = parse_document(filename, raw)

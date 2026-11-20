@@ -5,8 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="csrf" content="{{ csrf }}">
   <title>{{ panel_name }}</title>
-  <link rel="icon" type="image/png" href="{{ url_for('static', filename='shift-mark.png', v=panel_version) }}">
+  <link rel="icon" type="image/png" href="{{ url_for('static', filename='uppetit-mark.png', v=panel_version) }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='panel.css', v=panel_version) }}">
+  <script src="{{ url_for('static', filename='knowledge-editor.js', v=panel_version) }}" defer></script>
   <script src="{{ url_for('static', filename='workspace.js', v=panel_version) }}" defer></script>
   <script src="{{ url_for('static', filename='panel.js', v=panel_version) }}" defer></script>
 </head>
@@ -37,6 +38,8 @@
     <symbol id="i-send" viewBox="0 0 24 24"><path d="m21 3-7 18-3.4-7.6L3 10zM11 13 21 3"/></symbol>
     <symbol id="i-server" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01m4-10h6m-6 10h6"/></symbol>
     <symbol id="i-book" viewBox="0 0 24 24"><path d="M12 6c-3-2-6-2-10-1v14c4-1 7-1 10 1 3-2 6-2 10-1V5c-4-1-7-1-10 1v14"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v11H3zM3 7V5h6l2 2h10v2"/></symbol>
+    <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8" cy="9" r="1.2"/><path d="m5 17 5-5 3 3 3-4 3 6"/></symbol>
     <symbol id="i-device" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="13" rx="2"/><path d="M8 21h8m-4-5v5"/></symbol>
   </svg>
 
@@ -68,9 +71,6 @@
         {% if key == 'knowledge' and 'knowledge.write' in user.grants %}
         <button type="button" data-action="work-editor" disabled>Редактор статьи</button>
         <button type="button" data-action="work-import" disabled>Импорт</button>
-        {% elif key == 'inventory' and 'inventory.write' in user.grants %}
-        <button type="button" data-action="work-receive" disabled>Приёмка</button>
-        <button type="button" data-action="work-move-selected" disabled>Движение техники</button>
         {% elif key == 'admin' %}
         <button type="button" data-action="work-edit-selected" disabled>Права доступа</button>
         {% endif %}

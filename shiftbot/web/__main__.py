@@ -13,7 +13,7 @@ from waitress import serve
 from ..config import ConfigError, load_env
 from .app import create_app
 from .demo import DemoIiko, DemoMail, demo_now, seed, seed_workspace
-from .knowledge import DOCUMENT_LIMIT
+from .media import ARTICLE_REQUEST_LIMIT
 from .service import Service
 from .settings import Vault
 from .storage import Database
@@ -44,7 +44,7 @@ def start(directory: Path, args, admin: str, password: str):
         previous_handler = signal.signal(signal.SIGTERM, interrupt_server)
         try:
             serve(app, host=args.host, port=args.port, threads=8, channel_timeout=60,
-                  max_request_body_size=DOCUMENT_LIMIT + 128 * 1024, ident="shift-panel")
+                  max_request_body_size=ARTICLE_REQUEST_LIMIT, ident="shift-panel")
         except KeyboardInterrupt:
             pass
         finally:
@@ -53,7 +53,7 @@ def start(directory: Path, args, admin: str, password: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Веб-панель iiko с SMTP и IMAP")
+    parser = argparse.ArgumentParser(description="Веб-панель Uppetit IT")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--data-dir", default="data")
