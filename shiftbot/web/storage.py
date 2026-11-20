@@ -8,7 +8,7 @@ from pathlib import Path
 from .settings import InputError, identifier
 
 
-DEFAULTS = {"enabled": False, "poll_seconds": 30, "delay_seconds": 0, "inclusive": False}
+DEFAULTS = {"enabled": False, "poll_seconds": 30, "inclusive": False}
 ENTITIES = {"servers", "points", "people"}
 
 
@@ -77,7 +77,8 @@ class Database:
                        (key, json.dumps(value)))
 
     def preferences(self):
-        return {**DEFAULTS, **self.get_setting("monitor", {})}
+        saved = self.get_setting("monitor", {})
+        return {key: saved.get(key, default) for key, default in DEFAULTS.items()}
 
     def get(self, entity: str, item_id: str) -> dict | None:
         if entity not in ENTITIES:
@@ -177,19 +178,13 @@ class Database:
                         status='queued', outcome=excluded.outcome, subject=excluded.subject, body=excluded.body,
                         revision=excluded.revision, attempts=0, retry_at=NULL, error=NULL
                     WHERE deliveries.status='cancelled' OR (
-                        deliveries.status='queued' AND deliveries.revision IS NOT excluded.revision
+                        deliveries.status IN ('queued','failed') AND deliveries.revision IS NOT excluded.revision
                     )
                     RETURNING id
                 """, job).fetchone()
                 if result:
                     ids.append(result[0])
         return ids
-
-    def auto_sent(self, point: str, day: str) -> list[dict]:
-        with self.connection() as db:
-            return [dict(row) for row in db.execute(
-                "SELECT recipient,outcome FROM deliveries WHERE point=? AND day=? AND kind='auto' AND status='sent'",
-                (point, day))]
 
     def queued(self, when: str, limit: int = 20) -> list[dict]:
         with self.connection() as db:
@@ -202,11 +197,6 @@ class Database:
         with self.connection() as db:
             db.execute("UPDATE deliveries SET status=?,attempts=?,error=?,retry_at=?,delivered_at=?,message_id=? WHERE id=?",
                        (status, attempts, error, retry_at, delivered_at, message_id, job_id))
-
-    def refresh_letter(self, job_id: int, outcome: str, subject: str, body: str):
-        with self.connection() as db:
-            db.execute("UPDATE deliveries SET outcome=?,subject=?,body=? WHERE id=? AND status='queued'",
-                       (outcome, subject, body, job_id))
 
     def retry(self, job_id: int) -> bool:
         with self.connection() as db:

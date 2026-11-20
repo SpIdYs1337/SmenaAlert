@@ -65,12 +65,21 @@ class WebPanelTests(unittest.TestCase):
             def __init__(self, *_):
                 pass
 
+            async def probe(self):
+                source.probes += 1
+
             async def shifts(self, outlet, _now):
+                source.shift_requests.append(outlet.name)
                 if outlet.name == "Сбой":
                     raise IikoError("Нет ответа iiko.")
                 return source.shifts.get(outlet.name, [])
 
+            async def close(self):
+                pass
+
         self.shifts = {}
+        self.shift_requests = []
+        self.probes = 0
         self.service = Service(self.db, self.vault, mailer=self.smtp, mailbox=self.imap,
                                iiko_factory=FixtureIiko, now=lambda: self.current)
         self.app = create_app(self.service, admin="admin", password="fixture-panel-password")
@@ -104,28 +113,30 @@ class WebPanelTests(unittest.TestCase):
     def add_person(self, name, email, points=()):
         return self.write("POST", "/people", {"name": name, "email": email, "points": list(points)}, 201)["id"]
 
-    def test_auto_alert_only_goes_to_assigned_people_and_has_follow_up(self):
+    def test_auto_alert_only_goes_to_assigned_people_and_stops_after_opening(self):
         server = self.configure()
         first = self.add_person("Анна", "anna@example.org")
         self.add_person("Другой сотрудник", "other@example.org")
         arbat = self.point(server, "Арбат", [first], 1)
         self.point(server, "Сбой", [first], 2)
         self.write("PUT", "/monitor", {"enabled": True})
+        self.current = self.current.replace(minute=15)
         for _ in range(2):
             asyncio.run(self.service.check())
             asyncio.run(self.service.deliver())
         self.assertEqual(len(self.smtp.messages), 1)
         self.assertEqual(self.smtp.messages[0][0], "anna@example.org")
-        self.assertIn("Опоздание с открытием", self.smtp.messages[0][1])
+        self.assertIn("Смена не открыта", self.smtp.messages[0][1])
         self.assertEqual(self.db.checks("2026-11-18")[arbat]["status"], "not_open")
-        self.shifts["Арбат"] = [Shift(1, self.current.replace(minute=7))]
+        self.current = self.current.replace(minute=19)
+        self.shifts["Арбат"] = [Shift(1, self.current.replace(minute=18))]
         asyncio.run(self.service.check())
         asyncio.run(self.service.deliver())
-        self.assertEqual(len(self.smtp.messages), 2)
-        self.assertIn("09:07:00", self.smtp.messages[1][2])
-        self.assertEqual({item["kind"] for item in self.db.history()}, {"auto", "followup"})
+        self.assertEqual(len(self.smtp.messages), 1)
+        self.assertEqual(self.db.checks("2026-11-18")[arbat]["status"], "late_open")
+        self.assertEqual([item["kind"] for item in self.db.history()], ["auto"])
 
-    def test_date_changes_are_per_point_and_never_alert_before_opening_time(self):
+    def test_date_changes_are_per_point_and_delay_checks_from_the_adjusted_schedule(self):
         server = self.configure()
         person = self.add_person("Анна", "anna@example.org")
         later = self.point(server, "Арбат", [person], 1)
@@ -147,9 +158,13 @@ class WebPanelTests(unittest.TestCase):
         states = {point["id"]: point["today"]["status"] for point in self.service.views()}
         self.assertEqual(states, {later: "waiting", closed: "day_off"})
 
-        self.current = self.current.replace(hour=10, minute=0, second=0)
+        self.current = self.current.replace(hour=10, minute=14, second=59)
+        self.assertEqual(asyncio.run(self.service.check(force=True)), 0)
+        self.assertEqual(self.shift_requests, [])
+        self.current = self.current.replace(minute=15, second=0)
         asyncio.run(self.service.check())
         asyncio.run(self.service.deliver())
+        self.assertEqual(self.shift_requests, ["Арбат"])
         self.assertEqual(len(self.smtp.messages), 1)
         self.assertIn("Арбат", self.smtp.messages[0][1])
         self.assertEqual(self.db.checks(today)[later]["status"], "not_open")
@@ -195,12 +210,13 @@ class WebPanelTests(unittest.TestCase):
         point = self.point(server, "Арбат", [good, bad], 1)
         self.write("PUT", "/monitor", {"enabled": True})
         self.smtp.rejected.add("olga@example.org")
+        self.current = self.current.replace(minute=15)
         asyncio.run(self.service.check())
         asyncio.run(self.service.deliver())
         results = {record["recipient"]: record["status"] for record in self.db.history()}
         self.assertEqual(results, {"anna@example.org": "sent", "olga@example.org": "queued"})
         self.write("PUT", f"/people/{bad}", {"name": "Ольга", "email": "olga@example.org", "points": []})
-        self.current = self.current.replace(minute=15)
+        self.current = self.current.replace(minute=16)
         asyncio.run(self.service.check())
         asyncio.run(self.service.deliver())
         results = {record["recipient"]: record["status"] for record in self.db.history()}
@@ -318,28 +334,60 @@ class WebPanelTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/statistics?days=91").status_code, 400)
         self.assertEqual(self.client.get("/api/statistics/day/2026-11-19").status_code, 400)
 
-    def test_opening_grace_and_sync_delay_precede_automatic_alerts(self):
+    def test_check_waits_fifteen_minutes_and_only_missing_shift_notifies(self):
         server = self.configure()
         person = self.add_person("Анна", "anna@example.org")
         timely = self.point(server, "Вовремя", [person], 1)
         late = self.point(server, "Поздно", [person], 2)
         missing = self.point(server, "Закрыта", [person], 3)
-        self.write("PUT", "/monitor", {"enabled": True, "inclusive": True, "delay_seconds": 10})
-        self.current = self.current.replace(minute=1, second=0)
+        self.write("PUT", "/monitor", {"enabled": True, "inclusive": True})
+        self.db.save_setting("monitor", {**self.db.preferences(), "delay_seconds": 3000})
+        self.shifts["Вовремя"] = [Shift(1, self.current.replace(minute=1))]
+        self.shifts["Поздно"] = [Shift(1, self.current.replace(minute=7))]
+        self.current = self.current.replace(minute=14, second=59)
         self.assertEqual(asyncio.run(self.service.check()), 0)
-        self.assertEqual(asyncio.run(self.service.check(force=True)), 3)
-        self.assertEqual(self.db.checks("2026-11-18")[missing]["status"], "waiting")
-        self.shifts["Вовремя"] = [Shift(1, self.current)]
-        self.shifts["Поздно"] = [Shift(1, self.current.replace(second=1))]
-        self.current = self.current.replace(second=9)
-        self.assertEqual(asyncio.run(self.service.check()), 0)
+        self.assertEqual(asyncio.run(self.service.check(force=True)), 0)
+        self.assertEqual(self.shift_requests, [])
         asyncio.run(self.service.deliver())
         self.assertEqual(self.smtp.messages, [])
-        self.current = self.current.replace(second=10)
+        self.current = self.current.replace(minute=15, second=0)
         self.assertEqual(asyncio.run(self.service.check()), 3)
         asyncio.run(self.service.deliver())
         checks = self.db.checks("2026-11-18")
         self.assertEqual(checks[timely]["status"], "on_time")
         self.assertEqual(checks[late]["status"], "late_open")
         self.assertEqual(checks[missing]["status"], "not_open")
-        self.assertEqual(len(self.smtp.messages), 2)
+        self.assertEqual(len(self.smtp.messages), 1)
+        self.assertIn("Закрыта", self.smtp.messages[0][1])
+
+    def test_manual_and_connection_checks_before_cutoff_do_not_read_shifts(self):
+        server = self.configure()
+        point = self.point(server, "Арбат", [], 1)
+        self.service.start()
+        self.addCleanup(self.service.close)
+        self.assertEqual(self.write("POST", f"/servers/{server}/probe", {}), {"ok": True})
+        self.assertEqual(self.write("POST", "/check", {"point": point})["checked"], 0)
+        self.assertEqual(self.probes, 1)
+        self.assertEqual(self.shift_requests, [])
+        self.current = self.current.replace(minute=15)
+        self.assertEqual(self.write("POST", "/check", {"point": point})["checked"], 1)
+        self.assertEqual(self.shift_requests, ["Арбат"])
+
+    def test_queued_letter_is_cancelled_if_a_shift_opens_before_sending(self):
+        server = self.configure()
+        person = self.add_person("Анна", "anna@example.org")
+        self.point(server, "Арбат", [person], 1)
+        self.write("PUT", "/monitor", {"enabled": True})
+        self.current = self.current.replace(minute=15)
+        asyncio.run(self.service.check())
+        job = self.db.queued(self.current.isoformat())[0]
+        self.db.enqueue([
+            {**job, "event_key": job["event_key"] + "/old", "outcome": "late_open", "revision": "old-policy"},
+            {**job, "event_key": job["event_key"] + "/followup", "kind": "followup", "outcome": "late_open"},
+        ])
+        self.current = self.current.replace(minute=16)
+        self.shifts["Арбат"] = [Shift(1, self.current)]
+        asyncio.run(self.service.check(force=True))
+        asyncio.run(self.service.deliver())
+        self.assertEqual(self.smtp.messages, [])
+        self.assertEqual([item["status"] for item in self.db.history()], ["cancelled"] * 3)

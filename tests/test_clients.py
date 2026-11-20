@@ -62,6 +62,15 @@ class IikoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(call[1].endswith("/auth") for call in http.calls), 2)
         self.assertEqual(http.calls[-1][2]["params"]["key"], "b" * 32)
 
+    async def test_probe_checks_authentication_without_requesting_shifts(self):
+        http = FakeHttp([self.key, "true", "b" * 32])
+        client = Iiko(self.server, http)
+        await client.probe()
+        await client.probe()
+        self.assertEqual([(method, url.rsplit("/", 1)[-1]) for method, url, _ in http.calls],
+                         [("POST", "auth"), ("GET", "logout"), ("POST", "auth")])
+        self.assertEqual(client.key, "b" * 32)
+
     async def test_auth_uses_get_only_if_post_not_allowed(self):
         http = FakeHttp([NetworkError(405), self.key, "[]"])
         await Iiko(self.server, http).shifts(outlet(), now())

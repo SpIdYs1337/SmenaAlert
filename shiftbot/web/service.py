@@ -9,7 +9,7 @@ from concurrent.futures import TimeoutError as WorkerTimeout
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from ..config import MSK, Outlet
+from ..config import MSK
 from ..domain import evaluate, opening_time
 from ..http import Http
 from ..iiko import Iiko, IikoError
@@ -18,6 +18,7 @@ from .settings import Endpoint, InputError, Vault, as_outlet, imap_settings, pub
 from .storage import Database
 
 log = logging.getLogger(__name__)
+SHIFT_CHECK_DELAY = timedelta(minutes=15)
 
 
 def stamp(now: datetime) -> str:
@@ -33,9 +34,7 @@ def opening_grace(prefs: dict) -> timedelta:
 
 
 def revision(point: dict, server: dict, prefs: dict) -> str:
-    data = [point, server, prefs["inclusive"], prefs["delay_seconds"]]
-    if grace := opening_grace(prefs):
-        data.append(grace.total_seconds())
+    data = [point, server, opening_grace(prefs).total_seconds(), SHIFT_CHECK_DELAY.total_seconds()]
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode("utf-8")).hexdigest()
 
 
@@ -46,19 +45,14 @@ def can_check_receipt(job: dict, config: dict) -> bool:
 
 STATES = {
     "on_time": "Смена открыта вовремя.", "late_open": "Смена открыта с опозданием.",
-    "not_open": "В iiko нет открытия смены за сегодня.", "waiting": "Ожидается контрольное время.",
+    "not_open": "В iiko нет открытия смены за сегодня.", "waiting": "Ожидается время проверки смены.",
     "unknown": "Статус открытия ещё не проверен.", "api_error": "iiko не подтвердил статус смены.",
     "day_off": "По графику выходной.", "paused": "Точка на паузе.",
 }
 
 
 def letter(point: dict, state: dict, now: datetime, kind: str, note: str = "") -> tuple[str, str]:
-    if kind == "auto":
-        title = "Опоздание с открытием"
-    elif kind == "followup":
-        title = "Смена открыта" if state["status"] == "late_open" else "Уточнение по открытию"
-    else:
-        title = "Статус открытия"
+    title = "Смена не открыта" if kind == "auto" else "Статус открытия"
     lines = [title, "", f"Точка: {point['name']}", f"Дата: {now:%d.%m.%Y} (МСК)",
              f"Открытие по графику: {clock_label(state.get('deadline'))}",
              f"Фактическое открытие: {clock_label(state.get('opened_at'))}", "",
@@ -153,15 +147,12 @@ class Service:
             client = await self._client(server)
             if discover:
                 return await client.discover("departments")
-            point = next((point for point in self.db.list("points") if point["server"] == server_id), None)
-            scope = as_outlet(point) if point else Outlet("probe", "Проверка", server_id)
             try:
-                shifts = await client.shifts(scope, self.now())
+                await client.probe()
             except IikoError as error:
                 self.db.save_setting(f"health:{server_id}", {"ok": False, "message": str(error)})
                 raise
-            self.db.save_setting(f"health:{server_id}", {"ok": True, "message": "Кассовые смены доступны."})
-            return len(shifts)
+            self.db.save_setting(f"health:{server_id}", {"ok": True, "message": "iiko принял учётные данные."})
 
     async def check(self, force=False, point_id=None):
         async with self._check_lock:
@@ -198,14 +189,10 @@ class Service:
         if scheduled is None:
             return False
         deadline = datetime.combine(now.date(), scheduled, MSK)
-        grace = opening_grace(prefs)
-        limit = deadline + grace
-        check_at = limit + timedelta(seconds=prefs["delay_seconds"])
-        if not force and (now < check_at or (grace and now <= limit)):
+        if now < deadline + SHIFT_CHECK_DELAY:
             return False
         fingerprint = revision(point, server, prefs)
         if not force and previous and previous.get("revision") == fingerprint and previous["status"] in ("on_time", "late_open"):
-            self._queue_auto(point, previous, now)
             return False
         try:
             client = await self._client(server)
@@ -217,7 +204,7 @@ class Service:
         if (checked_at.date() != now.date() or self.db.get("points", point["id"]) != point
                 or self.db.get("servers", server["id"]) != server):
             return False
-        result = evaluate(outlet, shifts, checked_at, grace=grace)
+        result = evaluate(outlet, shifts, checked_at, grace=opening_grace(prefs))
         state = {"status": "api_error" if error else result.status, "opened_at": stamp(result.opened_at) if result.opened_at else None,
                  "deadline": stamp(deadline), "checked_at": stamp(checked_at), "error": error, "revision": fingerprint}
         self.db.save_check(point["id"], day, state)
@@ -233,45 +220,37 @@ class Service:
                  "day": day, "kind": kind, "outcome": outcome, "recipient": contact["email"],
                  "subject": subject, "body": body, "created_at": stamp(now), "revision": source_revision,
                  "event_key": f"{point_id}/{day}/{kind}/{contact['email'].casefold()}"
-                 if kind in ("auto", "followup") else None} for contact in recipients]
+                 if kind == "auto" else None} for contact in recipients]
 
     def _queue_auto(self, point: dict, state: dict, now: datetime):
         status = state["status"]
-        if status not in ("on_time", "not_open", "late_open"):
+        if status != "not_open":
             return
         recipients = self.db.targets(point["id"])
-        delivered = {row["recipient"]: row["outcome"] for row in self.db.auto_sent(point["id"], now.date().isoformat())}
-        jobs = []
-        if status in ("not_open", "late_open"):
+        if recipients:
             subject, body = letter(point, state, now, "auto")
-            jobs.extend(self._jobs([contact for contact in recipients if contact["email"] not in delivered],
-                                   point, "auto", status, subject, body, now, state["revision"]))
-        if status in ("on_time", "late_open"):
-            subject, body = letter(point, state, now, "followup")
-            jobs.extend(self._jobs([contact for contact in recipients if delivered.get(contact["email"]) == "not_open"],
-                                   point, "followup", status, subject, body, now, state["revision"]))
-        if jobs:
-            self.db.enqueue(jobs)
+            self.db.enqueue(self._jobs(recipients, point, "auto", status, subject, body, now, state["revision"]))
 
     def views(self) -> list[dict]:
         now = self.now()
         checks = self.db.checks(now.date().isoformat())
         servers = {server["id"]: server for server in self.db.list("servers")}
         prefs = self.db.preferences()
-        grace = opening_grace(prefs)
         links = self.db.links()
         points = []
         for point in self.db.list("points"):
             scheduled = opening_time(as_outlet(point), now.date())
             deadline = datetime.combine(now.date(), scheduled, MSK) if scheduled is not None else None
+            check_at = deadline + SHIFT_CHECK_DELAY if deadline is not None else None
             saved = checks.get(point["id"], {})
             if saved.get("revision") != revision(point, servers.get(point["server"], {}), prefs):
                 saved = {}
             status = "paused" if not point["active"] else "day_off" if deadline is None else saved.get("status")
             if not status:
-                status = "waiting" if now < deadline or (grace and now <= deadline + grace) else "unknown"
+                status = "waiting" if now < check_at else "unknown"
             points.append({**point, "people": links.get(point["id"], []), "today": {
                 **saved, "status": status, "deadline": stamp(deadline) if deadline else None,
+                "check_at": stamp(check_at) if check_at else None,
             }})
         return points
 
@@ -351,7 +330,8 @@ class Service:
 
     def _auto_valid(self, job: dict, now: datetime) -> bool:
         prefs = self.db.preferences()
-        if not prefs["enabled"] or job["day"] != now.date().isoformat():
+        if (job["kind"] != "auto" or job["outcome"] != "not_open" or not prefs["enabled"]
+                or job["day"] != now.date().isoformat()):
             return False
         point = self.db.get("points", job["point"])
         if not point or not point["active"]:
@@ -360,8 +340,10 @@ class Service:
         if not server or job["revision"] != revision(point, server, prefs):
             return False
         state = self.db.checks(job["day"]).get(point["id"], {})
-        expected = ("late_open", "not_open") if job["kind"] == "auto" else ("on_time", "late_open")
-        return state.get("status") in expected
+        if state.get("status") != "not_open" or state.get("revision") != job["revision"]:
+            return False
+        check_at = datetime.fromisoformat(state["deadline"]) + SHIFT_CHECK_DELAY
+        return check_at <= min(now, datetime.fromisoformat(state["checked_at"]))
 
     async def deliver(self):
         async with self._smtp_lock:
@@ -379,14 +361,8 @@ class Service:
                 attempts = job["attempts"] + 1
                 try:
                     config, password = self._smtp_config()
-                    subject, body = job["subject"], job["body"]
-                    if job["kind"] == "auto" and job["outcome"] == "not_open":
-                        current = self.db.checks(job["day"]).get(job["point"], {})
-                        if current.get("status") == "late_open":
-                            subject, body = letter({"name": job["point_name"]}, current, now, "auto")
-                            self.db.refresh_letter(job["id"], "late_open", subject, body)
                     message_id = await asyncio.to_thread(self.mailer.send, config, password, job["recipient"],
-                                                         subject, body, key=job["id"])
+                                                         job["subject"], job["body"], key=job["id"])
                 except (MailError, InputError) as error:
                     temporary = isinstance(error, MailError) and error.retryable and attempts < 3 and job["kind"] != "test"
                     retry = stamp(now + timedelta(minutes=attempts)) if temporary else None

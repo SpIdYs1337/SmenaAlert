@@ -19,7 +19,7 @@ const mailStates = {
   queued: ["В очереди", ""], sent: [demo ? "Симуляция" : "Принято SMTP", "green"],
   failed: ["Ошибка", "red"], cancelled: ["Отменено", ""],
 };
-const mailKinds = {auto: "Опоздание", followup: "Уточнение", manual: "Вручную", test: "Тест"};
+const mailKinds = {auto: "Оповещение", followup: "Уточнение", manual: "Вручную", test: "Тест"};
 const pointPriority = ["not_open", "api_error", "late_open", "waiting", "unknown", "on_time", "day_off", "paused"];
 const days = {mon: "Понедельник", tue: "Вторник", wed: "Среда", thu: "Четверг", fri: "Пятница", sat: "Суббота", sun: "Воскресенье"};
 const ui = {page: "overview", snapshot: null, query: "", filter: "all", statistics: {days: "7", point: ""}};
@@ -206,7 +206,8 @@ function pointRows() {
         <span class="point-icon">${icon("store")}</span>${esc(point.name)}</button></td>
       <td class="tabular" data-label="По графику">${time(state.deadline)}</td>
       <td class="tabular ${!state.opened_at ? "muted" : ""}" data-label="Открыта">${time(state.opened_at)}</td>
-      <td data-label="Статус">${badge(...(statusLabels[state.status] || statusLabels.unknown))}</td>
+      <td data-label="Статус">${badge(...(statusLabels[state.status] || statusLabels.unknown))}
+        ${state.status === "waiting" && state.check_at ? `<span class="status-time">Проверка с ${time(state.check_at)}</span>` : ""}</td>
       <td class="people-cell" data-label="Ответственные">${assigned.length ? esc(assigned.map(person => person.name).join(", ")) : "Не назначены"}</td>
       <td><div class="table-end">${iconButton("point-mail", "Предпросмотр письма", "mail", point.id)}
         ${iconButton("point-edit", "Редактировать точку", "right", point.id)}</div></td>
@@ -457,12 +458,11 @@ function monitorPage() {
       <form class="card-body stack" data-form="monitor">
         <div class="error-box" data-error role="alert"></div>
         <label class="check check-block"><input name="enabled" type="checkbox" ${checked(options.enabled)}>
-          <span><strong>Отправлять автоматически</strong><small>При опоздании письмо получают назначенные сотрудники.</small></span></label>
+          <span><strong>Отправлять автоматически</strong><small>Письмо получают назначенные сотрудники, если на момент проверки в iiko нет открытия смены.</small></span></label>
         ${ready ? "" : `<p class="notice">Для включения добавьте SMTP, активную точку и её получателей.</p>`}
+        <p class="notice">Запрос смены доступен через 15 минут после открытия по графику.</p>
         <div class="field-grid">
-          <label>Период проверки, сек<input name="poll_seconds" type="number" min="5" max="300" required value="${options.poll_seconds}"></label>
-          <label>Задержка уведомления, сек<input name="delay_seconds" type="number" min="0" max="3600" required value="${options.delay_seconds}">
-            <span class="hint">Время на синхронизацию с iiko после допустимого срока открытия.</span></label>
+          <label>Интервал проверки, сек<input name="poll_seconds" type="number" min="5" max="300" required value="${options.poll_seconds}"></label>
         </div>
         <label class="check check-block"><input name="inclusive" type="checkbox" ${checked(options.inclusive)}>
           <span><strong>Допуск 1 минута к графику открытия</strong><small>При графике 09:00 открытие до 09:01:00 включительно считается своевременным.</small></span></label>
@@ -544,6 +544,7 @@ function pointStatus(point) {
     <div><dt>По графику · МСК</dt><dd class="tabular">${time(current.deadline)}</dd></div>
     <div><dt>Открыта · МСК</dt><dd class="tabular">${time(current.opened_at)}</dd></div>
   </dl>
+    ${current.status === "waiting" && current.check_at ? `<p class="muted">Проверка с ${time(current.check_at)} МСК.</p>` : ""}
     <div class="row">${button("check-point", "Проверить", {id: point.id, icon: "refresh"})}
     ${button("point-mail", "Предпросмотр письма", {id: point.id, icon: "mail"})}</div>
     ${current.error ? `<p class="error-box">${esc(current.error)}</p>` : ""}`;
@@ -696,7 +697,7 @@ async function handleForm(form) {
     }
     case "monitor":
       await api("/monitor", "PUT", {enabled: values.has("enabled"), inclusive: values.has("inclusive"),
-        poll_seconds: Number(values.get("poll_seconds")), delay_seconds: Number(values.get("delay_seconds"))});
+        poll_seconds: Number(values.get("poll_seconds"))});
       await refresh();
       toast("Параметры авторассылки сохранены.");
       return;
@@ -714,7 +715,7 @@ async function runCheck(id) {
   const section = drawer.open ? drawer.querySelector("[data-point-state]") : null;
   const point = ui.snapshot.points.find(item => item.id === id);
   if (point && section?.closest("form").dataset.id === id) section.innerHTML = pointStatus(point);
-  toast(result.checked ? `Проверено точек: ${result.checked}.` : "Нет активных точек с графиком на сегодня.");
+  toast(result.checked ? `Проверено точек: ${result.checked}.` : "Нет точек, готовых к проверке. Смены доступны для проверки через 15 минут после открытия по графику.");
 }
 async function loadDepartments(form) {
   const {items} = await api(`/servers/${form.elements.server.value}/departments`, "POST");
@@ -762,8 +763,8 @@ const actions = {
   "exception-remove": (_, node) => node.closest(".exception-row").remove(),
   "server-probe": async id => {
     try {
-      const result = await api(`/servers/${id}/probe`, "POST");
-      toast(`iiko ответил. Смен за сегодня: ${result.shifts}.`);
+      await api(`/servers/${id}/probe`, "POST");
+      toast("iiko принял учётные данные.");
     } finally {
       await refresh();
     }

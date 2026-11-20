@@ -84,16 +84,23 @@ class Iiko:
             raise IikoError("Неверный ответ авторизации")
         self.key = key
 
-    async def _get(self, path: str, params=None, *, accept: str = "application/json"):
+    async def probe(self):
+        await self._request(None)
+
+    async def _request(self, path: str | None, params=None, *, accept: str = "application/json"):
         async with self._lock:
             loop = asyncio.get_running_loop()
             if loop.time() < self._blocked_until:
                 raise IikoError("iiko: пауза после ошибки связи/ограничения API")
+            if path is None:
+                await self._logout()
             for attempt in range(2):
                 authorized = False
                 try:
                     if not self.key:
                         await self._login()
+                    if path is None:
+                        return
                     authorized = True
                     return await self.http.request(
                         "GET", self.server.base_url + path,
@@ -126,7 +133,7 @@ class Iiko:
             params["departmentId"] = outlet.department_id
         if outlet.group_id:
             params["groupId"] = outlet.group_id
-        response = await self._get("/api/v2/cashshifts/list", params)
+        response = await self._request("/api/v2/cashshifts/list", params)
         try:
             payload = response.json()
         except NetworkError:
@@ -136,7 +143,7 @@ class Iiko:
     async def discover(self, kind: str) -> list[dict]:
         if kind not in ("departments", "groups"):
             raise ValueError("Unknown kind")
-        response = await self._get(f"/api/corporation/{kind}", accept="application/xml, text/xml;q=0.9")
+        response = await self._request(f"/api/corporation/{kind}", accept="application/xml, text/xml;q=0.9")
         try:
             root = ET.fromstring(response.body)
         except ET.ParseError:
@@ -150,11 +157,14 @@ class Iiko:
 
     async def close(self):
         async with self._lock:
-            if self.key:
-                key, self.key = self.key, None
-                try:
-                    await self.http.request(
-                        "GET", self.server.base_url + "/api/logout", params={"key": key}, headers=_AUTH_HEADERS,
-                    )
-                except NetworkError:
-                    pass
+            await self._logout()
+
+    async def _logout(self):
+        if self.key:
+            key, self.key = self.key, None
+            try:
+                await self.http.request(
+                    "GET", self.server.base_url + "/api/logout", params={"key": key}, headers=_AUTH_HEADERS,
+                )
+            except NetworkError:
+                pass

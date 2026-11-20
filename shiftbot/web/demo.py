@@ -29,6 +29,9 @@ class DemoIiko:
     def __init__(self, _endpoint, _http):
         pass
 
+    async def probe(self):
+        pass
+
     async def shifts(self, outlet, now):
         for index, (_, _, opened, state, _) in enumerate(SAMPLES):
             if department(index) == outlet.department_id:
@@ -63,7 +66,7 @@ def seed(service: Service):
     db, vault, now = service.db, service.vault, service.now()
     server_id = db.save("servers", {"name": "iikoChain · Москва", "base_url": "https://chain.example.org/resto",
                                    "login": "api_monitor", "secret": vault.encrypt("demo-connection"), "timezone": "Europe/Moscow"})
-    db.save_setting(f"health:{server_id}", {"ok": True, "message": "Кассовые смены доступны."})
+    db.save_setting(f"health:{server_id}", {"ok": True, "message": "iiko принял учётные данные."})
     db.save_setting("smtp", {"host": "smtp.yandex.ru", "port": 465, "security": "ssl", "sender_name": "Контроль открытия",
                              "login": "alerts@example.org", "sender": "alerts@example.org", "secret": vault.encrypt("demo-mail")})
     db.save_setting("health:smtp", {"ok": True, "message": "Соединение с SMTP установлено."})
@@ -94,7 +97,7 @@ def seed(service: Service):
                 "status": outcome, "deadline": stamp(planned), "opened_at": stamp(actual) if actual else None,
                 "checked_at": stamp(planned + timedelta(minutes=25)),
             })
-        if status in ("late_open", "not_open"):
+        if status == "not_open":
             service._queue_auto(db.get("points", point_id), checked, now)
     for job in db.queued(stamp(now)):
         db.finish(job["id"], "sent", 1, delivered_at=stamp(now))

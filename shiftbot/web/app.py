@@ -205,7 +205,8 @@ def create_app(service: Service, *, admin: str, password: str, secure_cookie=Fal
 
     @app.post("/api/servers/<server_id>/probe")
     def probe_iiko(server_id):
-        return jsonify(shifts=service.call(service.probe_iiko, server_id, False))
+        service.call(service.probe_iiko, server_id, False)
+        return jsonify(ok=True)
 
     @app.post("/api/servers/<server_id>/departments")
     def departments(server_id):
@@ -224,8 +225,7 @@ def create_app(service: Service, *, admin: str, password: str, secure_cookie=Fal
         previous = db.preferences()
         settings = {"enabled": flag(payload, "enabled", previous["enabled"]),
                     "inclusive": flag(payload, "inclusive", previous["inclusive"]),
-                    "poll_seconds": number(payload.get("poll_seconds", previous["poll_seconds"]), "Интервал проверки", 5, 300),
-                    "delay_seconds": number(payload.get("delay_seconds", previous["delay_seconds"]), "Задержка уведомления", 0, 3600)}
+                    "poll_seconds": number(payload.get("poll_seconds", previous["poll_seconds"]), "Интервал проверки", 5, 300)}
         if settings["enabled"] and not previous["enabled"]:
             if not db.get_setting("smtp"):
                 raise InputError("Сохраните настройки SMTP, чтобы включить авторассылку.")
