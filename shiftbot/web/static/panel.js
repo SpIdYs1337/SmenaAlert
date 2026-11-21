@@ -8,6 +8,7 @@ const panelName = document.body.dataset.panelName;
 const grants = new Set(document.body.dataset.grants.split(" "));
 const labels = {
   knowledge: "База знаний", inventory: "IT-инвентарь", admin: "Администрирование", account: "Мой профиль",
+  "knowledge-archive": "Архив базы знаний", "inventory-archive": "Архив списанной техники",
   overview: "Обзор", statistics: "Статистика", points: "Торговые точки", history: "Журнал писем",
   people: "Получатели", iiko: "Подключение iiko", smtp: "Почта · SMTP", imap: "Почта · IMAP", monitor: "Авторассылка",
 };
@@ -148,7 +149,7 @@ function closeModuleMenu() {
 }
 function render() {
   const pages = {overview: pointsPage, statistics: statisticsPage, points: pointsPage, people: peoplePage, history: historyPage,
-    iiko: iikoPage, smtp: mailPage, imap: mailPage, monitor: monitorPage, knowledge: workPage, inventory: workPage, admin: workPage, account: workPage};
+    iiko: iikoPage, smtp: mailPage, imap: mailPage, monitor: monitorPage};
   const tab = document.querySelector(`.section-nav [data-page="${ui.page}"]`);
   const section = tab.closest(".section-nav");
   for (const group of document.querySelectorAll(".section-nav")) group.hidden = group !== section;
@@ -158,6 +159,7 @@ function render() {
     else link.removeAttribute("aria-current");
   }
   for (const shortcut of section.querySelectorAll("[data-action]")) {
+    shortcut.hidden = ui.page === "knowledge-archive";
     shortcut.disabled = work.page !== ui.page || !work.data;
   }
   const mode = document.querySelector("#mode");
@@ -167,7 +169,7 @@ function render() {
     mode.innerHTML = `<span class="dot"></span>Авторассылка ${active ? "включена" : "на паузе"}`;
   }
   document.title = `${labels[ui.page]} · ${panelName}`;
-  content.innerHTML = pages[ui.page]();
+  content.innerHTML = isWorkPage(ui.page) ? workPage() : pages[ui.page]();
 }
 function metric(key, label, count, tone = "") {
   return `<button class="metric ${tone}" type="button" data-action="filter" data-id="${key}" aria-pressed="${ui.filter === key}">

@@ -7,8 +7,9 @@ from datetime import date
 from .settings import InputError, identifier, number, text
 
 ACTIONS = {"receive": "Приёмка", "commission": "Ввод в эксплуатацию", "assign": "Выдача сотруднику",
-           "transfer": "Передача сотруднику", "return": "Возврат на склад", "relocate": "Перемещение"}
-STATES = {"stock": "На складе", "in_use": "В эксплуатации"}
+           "transfer": "Передача сотруднику", "return": "Возврат на склад", "relocate": "Перемещение",
+           "write_off": "Списание"}
+STATES = {"stock": "На складе", "in_use": "В эксплуатации", "written_off": "Списано"}
 
 SERVICE_WARNING_DAYS = 30
 SERVICE_MAX_MONTHS = 600
@@ -68,18 +69,19 @@ class Inventory:
     def __init__(self, db):
         self.db = db
 
-    def assets(self, today, employee=None):
+    def assets(self, today, employee=None, *, archived=False):
         query = f"""
-                SELECT {ASSET_FIELDS}, e.id AS version,e.day,e.state,e.employee,e.location,
+                SELECT {ASSET_FIELDS}, e.id AS version,e.day,e.state,e.employee,e.location,e.note,
                        COALESCE(holder.name,e.employee_name) AS employee_name,r.day AS received_on
                 FROM assets a JOIN asset_events e ON e.id=(SELECT max(id) FROM asset_events WHERE asset=a.id)
                     JOIN asset_events r ON r.asset=a.id AND r.action='receive'
                     LEFT JOIN employees holder ON holder.id=e.employee
+                WHERE (e.state='written_off')=?
         """
-        params = ()
+        params = (archived,)
         if employee is not None:
-            query += " WHERE e.employee=?"
-            params = (employee,)
+            query += " AND e.employee=?"
+            params += (employee,)
         with self.db.connection() as conn:
             return [service_term(row, today) for row in conn.execute(query + " ORDER BY a.tag_key", params)]
 
@@ -119,15 +121,22 @@ class Inventory:
         version = number(data.get("version"), "Версия карточки", 1, 2**63-1)
         action = text(data, "action", "Операция")
         location = text(data, "location", "Куда перемещается техника", required=action == "relocate", limit=160)
-        note = text(data, "note", "Основание или комментарий", required=False, limit=500)
+        writing_off = action == "write_off"
+        label = "Причина списания" if writing_off else "Основание или комментарий"
+        note = text(data, "note", label, required=writing_off, limit=500)
         day = event_day(data, now)
         with self.db.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             last = conn.execute("SELECT * FROM asset_events WHERE asset=? ORDER BY id DESC LIMIT 1", (item,)).fetchone()
             if not last or last["id"] != version:
                 raise InputError("Состояние техники изменилось. Откройте карточку заново.")
+            if last["state"] == "written_off":
+                raise InputError("Устройство уже списано.")
             if day < last["day"]:
                 raise InputError("Дата должна быть не раньше предыдущей операции.")
+            if writing_off:
+                record(conn, item, action, "written_off", None, "", day, now, actor, note, last["location"])
+                return
             if action == "relocate":
                 if location.casefold() == last["location"].casefold():
                     raise InputError("Укажите новое место устройства.")
@@ -164,7 +173,9 @@ class Inventory:
         with self.db.connection() as conn:
             updated = conn.execute("""
                 UPDATE assets SET service_months=?,service_revision=service_revision+1
-                WHERE id=? AND service_revision=? AND EXISTS(
+                WHERE id=? AND service_revision=?
+                    AND (SELECT state FROM asset_events WHERE asset=assets.id ORDER BY id DESC LIMIT 1)<>'written_off'
+                    AND EXISTS(
                     SELECT 1 FROM asset_events WHERE asset=assets.id AND state='in_use')
             """, (months, item, version))
             if not updated.rowcount:
@@ -178,8 +189,12 @@ class Inventory:
     def save_photo(self, item, photo):
         with self.db.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            if not conn.execute("SELECT 1 FROM assets WHERE id=?", (item,)).fetchone():
+            current = conn.execute("SELECT state FROM asset_events WHERE asset=? ORDER BY id DESC LIMIT 1",
+                                   (item,)).fetchone()
+            if not current:
                 return False
+            if current["state"] == "written_off":
+                raise InputError("Устройство уже списано.")
             if photo is None:
                 conn.execute("DELETE FROM asset_photos WHERE asset=?", (item,))
             else:

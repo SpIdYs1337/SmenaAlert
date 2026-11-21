@@ -55,6 +55,7 @@ class Database:
                 "articles": {
                     "kind": "TEXT NOT NULL DEFAULT 'article' CHECK(kind IN ('section','article'))",
                     "html": "TEXT",
+                    "archive_root": "TEXT REFERENCES articles(id)",
                 },
                 "assets": {
                     "service_months": "INTEGER CHECK(service_months BETWEEN 1 AND 600)",
@@ -70,15 +71,17 @@ class Database:
 
     @staticmethod
     def _migrate_asset_events(db):
-        columns = {column["name"] for column in db.execute("PRAGMA table_info(asset_events)")}
-        previous_schema = columns and "location" not in columns
+        schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='asset_events'").fetchone()
+        previous_schema = schema and "'write_off'" not in schema["sql"]
         if previous_schema:
+            columns = {column["name"] for column in db.execute("PRAGMA table_info(asset_events)")}
+            location = "location" if "location" in columns else "''"
             db.execute("ALTER TABLE asset_events RENAME TO asset_events_previous")
         db.execute(Path(__file__).with_name("asset_events.sql").read_text(encoding="utf-8"))
         if previous_schema:
-            db.execute("""
+            db.execute(f"""
                 INSERT INTO asset_events(id,asset,action,state,employee,employee_name,day,recorded_at,actor,actor_name,note,location)
-                SELECT id,asset,action,state,employee,employee_name,day,recorded_at,actor,actor_name,note,''
+                SELECT id,asset,action,state,employee,employee_name,day,recorded_at,actor,actor_name,note,{location}
                 FROM asset_events_previous
             """)
             db.execute("DROP TABLE asset_events_previous")

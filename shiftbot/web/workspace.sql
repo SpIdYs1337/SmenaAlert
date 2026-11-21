@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS articles (
     edited_at TEXT NOT NULL,
     edited_by TEXT NOT NULL,
     kind TEXT NOT NULL DEFAULT 'article' CHECK(kind IN ('section','article')),
-    html TEXT
+    html TEXT,
+    archive_root TEXT REFERENCES articles(id)
 );
 CREATE INDEX IF NOT EXISTS articles_parent ON articles(parent);
 CREATE TABLE IF NOT EXISTS documents (

@@ -1,4 +1,4 @@
-"""Normalize photos and verify the duration and format of article videos."""
+"""Prepare article attachments and normalize device photos."""
 from __future__ import annotations
 
 import io
@@ -15,6 +15,8 @@ from .settings import InputError, text
 
 IMAGE_LIMIT = 5 * 1024 * 1024
 VIDEO_LIMIT = 20 * 1024 * 1024
+FILE_LIMIT = 20 * 1024 * 1024
+DOWNLOAD_MIME = "application/octet-stream"
 VIDEO_SECONDS = 20
 ARTICLE_REQUEST_LIMIT = 32 * 1024 * 1024
 PHOTO_REQUEST_LIMIT = IMAGE_LIMIT + 128 * 1024
@@ -114,4 +116,4 @@ def article_media(upload):
         return Media(name, "image/webp", photo_content(upload))
     if ext in VIDEO_FORMATS:
         return video_content(upload, name, VIDEO_FORMATS[ext])
-    raise InputError("Выберите фото JPG, PNG, WebP или видео MP4, MOV, WebM.")
+    return Media(name, DOWNLOAD_MIME, file_contents(upload, FILE_LIMIT, "Файл"))

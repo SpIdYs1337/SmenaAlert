@@ -1,6 +1,10 @@
 "use strict";
 
-const workSources = {knowledge: "knowledge", inventory: "inventory", admin: "employees", account: "profile"};
+const workSources = {
+  knowledge: "knowledge", "knowledge-archive": "knowledge?archived=1",
+  inventory: "inventory", "inventory-archive": "inventory?archived=1",
+  admin: "employees", account: "profile",
+};
 const workClock = new Intl.DateTimeFormat("ru-RU", {timeZone:"Europe/Moscow", dateStyle:"short", timeStyle:"short"});
 const work = {page: "", data: null, error: "", selection: {}, article: null, asset: null, person: null, assigned: [], request: 0, collapsed: new Set(), serviceFilter: "all", statusFilter: "all"};
 
@@ -11,6 +15,7 @@ function isWorkPage(page) {
 async function loadWork(reload = true, focusDetail = false) {
   const page = ui.page;
   if (!isWorkPage(page)) return;
+  const module = page.replace(/-archive$/, "");
   const request = ++work.request;
   try {
     const data = !reload && work.page === page && work.data ? work.data : await api(`/work/${workSources[page]}`);
@@ -19,8 +24,8 @@ async function loadWork(reload = true, focusDetail = false) {
     if (page === "account") {
       ({person, assigned} = data);
     } else if (item) {
-      if (page === "knowledge") article = await api(`/work/knowledge/${item.id}`);
-      if (page === "inventory") asset = await api(`/work/inventory/${item.id}`);
+      if (module === "knowledge") article = await api(`/work/knowledge/${item.id}`);
+      if (module === "inventory") asset = await api(`/work/inventory/${item.id}`);
       if (page === "admin") {
         person = item;
         assigned = (await api(`/work/inventory?employee=${encodeURIComponent(person.id)}`)).items;
@@ -49,7 +54,7 @@ function selectRecord(page, id) {
 function workPage() {
   if (work.page !== ui.page) return `<p class="muted" role="status">Загрузка…</p>`;
   if (work.error) return empty("alert", "Раздел не загрузился", work.error, button("work-reload", "Повторить"));
-  return {knowledge: knowledgePage, inventory: inventoryPage, admin: employeePage, account: accountPage}[ui.page]();
+  return {knowledge: knowledgePage, inventory: inventoryPage, admin: employeePage, account: accountPage}[ui.page.replace(/-archive$/, "")]();
 }
 
 function articleHierarchy(items) {
@@ -67,7 +72,7 @@ function articleTree(children, parent = null, prefix = "") {
   const attributes = parent ? `id="kb-children-${esc(parent)}" ${work.collapsed.has(parent) ? "hidden" : ""}` : "";
   return `<ol class="kb-tree" ${attributes}>${items.map((item, index) => {
     const number = prefix + (index + 1);
-    const active = item.id === work.selection.knowledge ? 'aria-current="true"' : "";
+    const active = item.id === work.selection[ui.page] ? 'aria-current="true"' : "";
     const toggle = children.has(item.id) ?
       `<button type="button" class="kb-toggle" data-action="work-toggle-branch" data-id="${esc(item.id)}"
         aria-label="Подпункты · ${esc(item.title)}" aria-controls="kb-children-${esc(item.id)}"
@@ -99,26 +104,52 @@ function revealArticle(item, items) {
 
 function knowledgePage() {
   const writer = grants.has("knowledge.write");
-  const actions = writer ? button("work-import", "Импорт документа", {icon:"list"}) +
+  const archived = ui.page === "knowledge-archive";
+  const actions = writer && !archived ? button("work-import", "Импорт документа", {icon:"list"}) +
     button("work-new-section", "Новый раздел", {icon:"folder"}) +
     button("work-new-article", "Новая статья", {icon:"plus", kind:"primary"}) : "";
-  const top = pageHead(labels.knowledge, "", actions);
-  if (!work.article) return top + `<section class="card">${empty("book", "База знаний пока пуста")}</section>`;
+  const top = pageHead(labels[ui.page], "", actions);
+  if (!work.article) return top + `<section class="card">${empty("book", archived ? "Архив пока пуст" : "База знаний пока пуста")}</section>`;
   const item = work.article;
   const children = articleHierarchy(work.data.items);
   const entries = children.get(item.id) || [];
-  const tools = writer ? button("work-child", "Добавить статью", {id:item.id, icon:"plus"}) +
-    button("work-edit-article", "Редактировать", {icon:"pencil"}) : "";
+  let tools = "";
+  if (writer && archived) {
+    if (item.archive_root === item.id && !item.parent_archived) {
+      tools += button("work-article-state", "Восстановить", {id:"restore"});
+    }
+    tools += button("work-article-state", "Удалить навсегда", {id:"delete", kind:"danger"});
+  } else if (writer) {
+    tools = button("work-child", "Добавить статью", {id:item.id, icon:"plus"}) +
+      button("work-edit-article", "Редактировать", {icon:"pencil"}) +
+      button("work-article-state", "В архив", {id:"archive"});
+  }
   const section = entries.length ? `<ul class="kb-section-entries">${entries.map(child =>
-    `<li><a href="#knowledge/${esc(child.id)}">${icon(child.kind === "section" ? "folder" : "list")}${esc(child.title)}</a></li>`).join("")}</ul>` :
+    `<li><a href="#${ui.page}/${esc(child.id)}">${icon(child.kind === "section" ? "folder" : "list")}${esc(child.title)}</a></li>`).join("")}</ul>` :
     '<p class="muted">В этом разделе пока нет статей.</p>';
-  return top + `<div class="work-split"><section class="card"><div class="card-head"><h2>Содержание</h2></div>
+  return top + `<div class="work-split"><section class="card"><div class="card-head"><h2>${archived ? "Архивные материалы" : "Содержание"}</h2></div>
     <div class="card-body work-tree-search"><label class="search">${icon("search")}<input type="search" data-article-search aria-label="Найти пункт" placeholder="Найти пункт" value="${esc(ui.query)}"></label></div>
     <nav class="card-body" aria-label="Пункты базы знаний">${articleTree(children)}<p data-no-articles class="muted" hidden>Ничего не найдено.</p></nav></section>
     <article class="card record-detail" tabindex="-1"><div class="card-head"><h2>${esc(item.title)}</h2><div class="row">${tools}</div></div>
-    <div class="card-body stack">${item.kind === "section" ? section : `<div class="kb-document">${articleContents(item)}</div>`}
+    <div class="card-body stack">
+    ${archived && writer && item.parent_archived ? '<p class="muted">Для восстановления начните с родительского пункта.</p>' : ""}
+    ${item.kind === "section" ? section : `<div class="kb-document">${articleContents(item)}</div>`}
     ${item.filename ? `<a class="button work-file" href="/api/work/knowledge/${esc(item.id)}/original" download>${icon("list")}Скачать ${esc(item.filename)}</a>` : ""}
     <p class="muted">Обновлено ${esc(workClock.format(new Date(item.edited_at)))} · ${esc(item.edited_by)}</p></div></article></div>`;
+}
+
+function articleStateForm(action) {
+  const item = work.article;
+  const [title, description, submit] = {
+    archive: ["Переместить в архив", "Пункт и его подпункты будут доступны в архиве базы знаний.", "В архив"],
+    restore: ["Восстановить из архива", "Пункт и подпункты, перемещённые вместе с ним, вернутся в базу знаний.", "Восстановить"],
+    delete: ["Удалить навсегда", "Пункт, все его подпункты и вложения будут удалены без возможности восстановления.", "Удалить навсегда"],
+  }[action];
+  drawerView(title, item.title, `
+    <p>${description}</p>
+    <input type="hidden" name="action" value="${action}">
+    <input type="hidden" name="version" value="${item.version}">`,
+    {form:"work-article-state", id:item.id, submit});
 }
 
 function parentOptions(parent, exclude) {
@@ -183,6 +214,7 @@ function assetFilters() {
 }
 
 function assetStatusBadge(state, started) {
+  if (state === "written_off") return badge(work.data.states[state]);
   if (!started) return badge("Принято", "blue");
   return badge(work.data.states[state], state === "in_use" ? "green" : "");
 }
@@ -208,19 +240,22 @@ function filterAssetStatus(id) {
 }
 
 function inventoryPage() {
-  const writer = grants.has("inventory.write");
-  const top = pageHead(labels.inventory, "", writer ? button("work-receive", "Принять технику", {icon:"plus", kind:"primary"}) : "");
-  if (!work.asset) return top + `<section class="card">${empty("device", "В реестре пока нет техники")}</section>`;
-  return top + assetStatusFilters(work.data.items) + `<div class="record-layout inventory-layout"><section class="card inventory-list"><div class="card-head">
-    <h2>Реестр техники</h2><div class="table-controls">${workSearch("Номер, техника или сотрудник")}${assetFilters()}</div></div>
+  const archived = ui.page === "inventory-archive";
+  const writer = grants.has("inventory.write") && !archived;
+  const top = pageHead(labels[ui.page], "", writer ? button("work-receive", "Принять технику", {icon:"plus", kind:"primary"}) : "");
+  if (!work.asset) return top + `<section class="card">${empty("device", archived ? "Списанных устройств пока нет" : "В реестре пока нет техники")}</section>`;
+  return top + (archived ? "" : assetStatusFilters(work.data.items)) + `<div class="record-layout inventory-layout"><section class="card inventory-list"><div class="card-head">
+    <h2>${archived ? "Списанные устройства" : "Реестр техники"}</h2><div class="table-controls">
+    ${workSearch(archived ? "Номер, техника или причина" : "Номер, техника или сотрудник")}${archived ? "" : assetFilters()}</div></div>
     <div class="table-wrap"><table class="point-table inventory-table"><thead><tr><th>Инв. номер</th><th>Техника</th>
-    <th>Состояние</th><th>Сотрудник</th><th>Срок эксплуатации</th></tr></thead>
-    <tbody>${work.data.items.map(asset => `<tr data-work-row data-service-status="${asset.service_status}" data-asset-state="${asset.state}"
-      data-asset-received="${!asset.service_started_on}" data-action="work-asset"
+    <th>Состояние</th>${archived ? "<th>Дата списания</th><th>Причина</th>" : "<th>Сотрудник</th><th>Срок эксплуатации</th>"}</tr></thead>
+    <tbody>${work.data.items.map(asset => `<tr data-work-row data-action="work-asset"
+      ${archived ? "" : `data-service-status="${asset.service_status}" data-asset-state="${asset.state}" data-asset-received="${!asset.service_started_on}"`}
       data-id="${esc(asset.id)}" class="${asset.id === work.asset.id ? "selected-row" : ""}">
       <td><button type="button" class="point-button" data-action="work-asset" data-id="${esc(asset.id)}" aria-pressed="${asset.id === work.asset.id}">${esc(asset.tag)}</button></td>
       <td data-label="Техника">${esc(asset.name)}</td><td data-label="Состояние">${assetStatusBadge(asset.state, asset.service_started_on)}</td>
-      <td data-label="Сотрудник">${esc(asset.employee_name || "—")}</td><td data-label="Срок эксплуатации">${serviceCell(asset)}</td></tr>`).join("")}</tbody></table>
+      ${archived ? `<td data-label="Дата списания">${esc(reportDate(asset.day))}</td><td data-label="Причина">${esc(asset.note)}</td>` :
+        `<td data-label="Сотрудник">${esc(asset.employee_name || "—")}</td><td data-label="Срок эксплуатации">${serviceCell(asset)}</td>`}</tr>`).join("")}</tbody></table>
     <p class="card-body muted" data-inventory-empty hidden>Техника по выбранным фильтрам не найдена.</p></div></section>${assetCard(work.asset)}</div>`;
 }
 
@@ -241,6 +276,7 @@ function receiveForm() {
 
 function assetCard(item) {
   const last = item.events[0];
+  const archived = last.state === "written_off";
   const received = item.events[item.events.length - 1];
   const actions = work.data.actions;
   const history = item.events.map((event, index) => {
@@ -255,9 +291,9 @@ function assetCard(item) {
       ${event.note ? `<p>${esc(event.note)}</p>` : ""}</li>`;
   }).join("");
   const moves = last.state === "stock" ? ["assign","commission"] : last.employee ? ["transfer","return"] : ["assign","return"];
-  const controls = grants.has("inventory.write") ? moves.map((action, index) =>
+  const writer = grants.has("inventory.write") && !archived;
+  const controls = writer ? moves.map((action, index) =>
     button("work-move", actions[action], {id:`${item.id}/${action}`, kind:index === 0 ? "primary" : ""})).join("") : "";
-  const writer = grants.has("inventory.write");
   const owner = last.employee && grants.has("admin.manage")
     ? `<a href="#admin/${esc(last.employee)}">${esc(item.employee_name)}</a>` : esc(item.employee_name || "—");
   const dateStarted = item.service_started_on ? esc(reportDate(item.service_started_on)) : "—";
@@ -272,11 +308,13 @@ function assetCard(item) {
     <div class="card-body stack"><div class="row"><strong>${esc(item.tag)}</strong>${assetStatusBadge(last.state, item.service_started_on)}</div>
     ${photo}<dl class="profile-facts"><div><dt>Дата приёмки</dt><dd>${esc(reportDate(received.day))}</dd></div>
     <div><dt>Серийный номер</dt><dd>${esc(item.serial || "—")}</dd></div><div><dt>Закреплено за</dt><dd>${owner}</dd></div>
-    <div><dt>Текущее место</dt><dd>${esc(last.location || "Место не указано")}</dd></div>
+    <div><dt>${archived ? "Последнее место" : "Текущее место"}</dt><dd>${esc(last.location || "Место не указано")}</dd></div>
     <div><dt>Начало эксплуатации</dt><dd>${dateStarted}</dd></div>
     <div><dt>Срок эксплуатации</dt><dd>${item.service_months ? esc(item.service_months) + " мес." : "—"}</dd></div>
-    <div><dt>Окончание срока</dt><dd>${item.service_started_on ? serviceCell(item) : "—"}</dd></div></dl>
-    ${writer ? `<div class="row">${controls}${relocate}${termButton}${photoButton}</div>` : ""}
+    <div><dt>Окончание срока</dt><dd>${archived ? (item.service_expires_on ? esc(reportDate(item.service_expires_on)) : "—") :
+      item.service_started_on ? serviceCell(item) : "—"}</dd></div></dl>
+    ${writer ? `<div class="row">${controls}${relocate}${termButton}${photoButton}
+      ${button("work-move", "Списать", {id:`${item.id}/write_off`, kind:"danger"})}</div>` : ""}
     <section aria-label="История устройства"><h3>История устройства</h3><ol class="movement-list">${history}</ol></section>
     </div></section>`;
 }
@@ -287,6 +325,17 @@ async function movementForm(key) {
   const [item, staff] = await Promise.all([api(`/work/inventory/${id}`), assign ? api("/work/inventory/assignees") : Promise.resolve({items:[]})]);
   if (ui.page !== "inventory") return;
   const last = item.events[0];
+  const hidden = `<input type="hidden" name="action" value="${esc(action)}"><input type="hidden" name="version" value="${item.version}">`;
+  const dayLabel = action === "write_off" ? "Дата списания" : "Дата операции";
+  const day = `<label>${dayLabel}<input name="day" type="date" required min="${last.day}" max="${work.data.today}" value="${work.data.today}"></label>`;
+  if (action === "write_off") {
+    drawerView("Списание техники", `${item.tag} · ${item.name}`, `
+      <p>Устройство перейдёт в списанные. Его карточка и история сохранятся в архиве.</p>
+      ${hidden}${day}
+      <label>Причина списания<input name="note" maxlength="500" required></label>`,
+      {form:"work-move", id, submit:"Списать"});
+    return;
+  }
   const choices = staff.items.filter(person => person.id !== last.employee);
   const selectEmployee = assign ? `<label>Сотрудник<select name="employee" aria-label="Сотрудник" required><option value="">Выберите сотрудника</option>
     ${choices.map(person => `<option value="${esc(person.id)}">${esc(person.name)}</option>`).join("")}</select></label>
@@ -294,12 +343,12 @@ async function movementForm(key) {
   const relocating = action === "relocate";
   const destination = relocating ? "" : action === "return" ? "Склад" : last.location || "";
   drawerView(work.data.actions[action], `${item.tag} · ${item.name}`, `
-    <input type="hidden" name="action" value="${esc(action)}"><input type="hidden" name="version" value="${item.version}">
+    ${hidden}
     ${selectEmployee}${!item.service_started_on && ["assign","commission"].includes(action) ? serviceField() : ""}
     ${relocating ? `<p class="muted">Текущее место · ${esc(last.location || "Место не указано")}</p>` : ""}
     <label>${relocating ? "Куда переместить" : "Место устройства"}<input name="location" maxlength="160"
       value="${esc(destination)}" placeholder="Например, склад или название точки" ${relocating ? "required" : ""}></label>
-    <label>Дата операции<input name="day" type="date" required min="${last.day}" max="${work.data.today}" value="${work.data.today}"></label>
+    ${day}
     <label>Заметка или реквизиты документа<input name="note" maxlength="500"></label>`, {form:"work-move", id, submit:"Провести операцию"});
 }
 
@@ -379,13 +428,24 @@ async function submitWork(form) {
   const data = Object.fromEntries(values);
   if (data.version) data.version = Number(data.version);
   const id = form.dataset.id;
-  let result;
+  let result, destination = page, message = "Сохранено.";
   switch (form.dataset.form) {
     case "work-article":
       result = await api(id ? `/work/knowledge/${id}` : "/work/knowledge", id ? "PUT" : "POST", articlePayload(form, data));
       break;
     case "work-import":
       result = await api("/work/knowledge/import", "POST", values);
+      break;
+    case "work-article-state":
+      if (data.action === "delete") {
+        await api(`/work/knowledge/${id}`, "DELETE", {version:data.version});
+        message = "Пункт удалён.";
+      } else {
+        const archived = data.action === "archive";
+        result = await api(`/work/knowledge/${id}/archive`, "PUT", {version:data.version, archived});
+        destination = archived ? "knowledge-archive" : "knowledge";
+        message = archived ? "Пункт перемещён в архив." : "Пункт восстановлен.";
+      }
       break;
     case "work-employee":
       data.active = values.has("active");
@@ -399,6 +459,10 @@ async function submitWork(form) {
     case "work-move":
       if (values.has("service_months")) data.service_months = Number(data.service_months);
       result = await api(`/work/inventory/${id}/events`, "POST", data);
+      if (data.action === "write_off") {
+        destination = "inventory-archive";
+        message = "Устройство списано.";
+      }
       break;
     case "work-service":
       result = await api(`/work/inventory/${id}/service`, "PUT",
@@ -409,27 +473,36 @@ async function submitWork(form) {
       break;
   }
   if (ui.page !== page || !drawer.open || !drawer.contains(form)) return;
+  drawer.close();
+  if (destination !== page) {
+    selectRecord(destination, result.id);
+    toast(message);
+    return;
+  }
   if (result) {
     ui.query = "";
     work.selection[ui.page] = result.id;
     history.replaceState(null, "", `#${ui.page}/${result.id}`);
+  } else if (form.dataset.form === "work-article-state") {
+    delete work.selection[page];
+    history.replaceState(null, "", `#${page}`);
   }
-  drawer.close();
   await loadWork(true, Boolean(result));
-  toast("Сохранено.");
+  toast(message);
 }
 
 const workActions = {
   "work-reload": loadWork,
-  "work-open-article": id => { location.hash = `knowledge/${id}`; },
+  "work-open-article": id => selectRecord(ui.page, id),
   "work-new-section": () => articleForm(null, null, "section"),
   "work-new-article": () => articleForm(null, work.article?.kind === "section" ? work.article.id : null),
   "work-toggle-branch": toggleBranch,
   "work-child": id => articleForm(null, id),
   "work-edit-article": () => articleForm(work.article, work.article.parent),
+  "work-article-state": articleStateForm,
   "work-import": importForm,
   "work-receive": receiveForm,
-  "work-asset": id => selectRecord("inventory", id),
+  "work-asset": id => selectRecord(ui.page, id),
   "work-inventory-filter": filterAssetStatus,
   "work-select-employee": id => selectRecord("admin", id),
   "work-editor": () => work.article?.kind === "section" ? articleForm(null, work.article.id) :

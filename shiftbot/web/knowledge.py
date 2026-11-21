@@ -22,10 +22,22 @@ MAX_MEDIA_BYTES = 64 * 1024 * 1024
 MEDIA_ID = re.compile(r"[0-9a-f]{16}")
 BLOCKS = {"p", "div", "h2", "h3", "h4", "blockquote", "ul", "ol", "li", "figure", "pre", "br", "hr"}
 EDITOR_TAGS = BLOCKS | {"strong", "b", "em", "i", "u", "s", "strike", "code", "a"}
+EDITOR_FORMAT = {
+    tag: {"data-align": {"left", "center", "right"}}
+    for tag in BLOCKS - {"br", "hr"}
+}
+EDITOR_FORMAT["figure"]["data-width"] = {"25", "50", "75", "100"}
 MAX_NODES = 300
 MAX_DEPTH = 24
 WORD = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 OUTLINE = re.compile(r"^(\d{1,3}(?:\.\d{1,3}){1,7}[.)]?|\d{1,3}[.)])\s+(.+)$")
+SUBTREE = """
+    WITH RECURSIVE subtree(id,depth) AS (
+        SELECT id,1 FROM articles WHERE id=?
+        UNION ALL
+        SELECT a.id,subtree.depth+1 FROM articles a JOIN subtree ON a.parent=subtree.id
+    )
+"""
 
 
 def numbered_item(line):
@@ -71,12 +83,13 @@ def clean_article(value):
         raise InputError("Текст статьи слишком большой.")
     html = nh3.clean(
         value, tags=EDITOR_TAGS, attributes={"a": {"href"}, "figure": {"data-media"}},
+        tag_attribute_values=EDITOR_FORMAT,
         clean_content_tags={"script", "style", "iframe", "object", "svg", "math", "template", "audio", "video"},
         url_schemes={"http", "https", "mailto"},
     )
     article = ArticleMarkup(html)
     if len(article.references) > MAX_MEDIA or len(set(article.references)) != len(article.references):
-        raise InputError("В статье может быть до 12 отдельных фото и видео.")
+        raise InputError("В статье может быть до 12 вложений.")
     return html, body_text("".join(article.lines).strip()), set(article.references)
 
 
@@ -233,15 +246,24 @@ class Knowledge:
     def __init__(self, db):
         self.db = db
 
-    def tree(self):
+    def tree(self, *, archived=False):
         with self.db.connection() as conn:
-            return [dict(row) for row in conn.execute("SELECT id,parent,title,kind FROM articles ORDER BY rowid")]
+            rows = conn.execute("""
+                SELECT a.id,CASE WHEN a.archive_root IS NULL OR p.archive_root IS NOT NULL THEN a.parent END AS parent,
+                       a.title,a.kind
+                FROM articles a LEFT JOIN articles p ON p.id=a.parent
+                WHERE (a.archive_root IS NOT NULL)=? ORDER BY a.rowid
+            """, (archived,))
+            return [dict(row) for row in rows]
 
     def get(self, item):
         with self.db.connection() as conn:
             conn.execute("BEGIN")
-            row = conn.execute("SELECT a.*,d.name AS filename FROM articles a LEFT JOIN documents d ON d.article=a.id "
-                               "WHERE a.id=?", (item,)).fetchone()
+            row = conn.execute("""
+                SELECT a.*,d.name AS filename,p.archive_root IS NOT NULL AS parent_archived
+                FROM articles a LEFT JOIN documents d ON d.article=a.id LEFT JOIN articles p ON p.id=a.parent
+                WHERE a.id=?
+            """, (item,)).fetchone()
             if not row:
                 return None
             media = conn.execute("SELECT id,name,mime,seconds FROM article_media WHERE article=? ORDER BY rowid", (item,))
@@ -253,10 +275,12 @@ class Knowledge:
         while parent is not None:
             if parent == item:
                 raise InputError("Нельзя перенести пункт внутрь его подпункта.")
-            row = conn.execute("SELECT parent FROM articles WHERE id=?", (parent,)).fetchone()
+            row = conn.execute("SELECT parent,archive_root FROM articles WHERE id=?", (parent,)).fetchone()
             if not row:
                 raise InputError("Выберите существующий родительский пункт.")
-            parent = row[0]
+            if row["archive_root"]:
+                raise InputError("Сначала восстановите родительский пункт из архива.")
+            parent = row["parent"]
             depth += 1
         if depth + height > MAX_DEPTH:
             raise InputError(f"Допускается до {MAX_DEPTH} уровней вложенности.")
@@ -271,18 +295,18 @@ class Knowledge:
             parent = text(data, "parent", "Родительский пункт", required=False) or None
         with self.db.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            previous = conn.execute("SELECT kind,body,html,version FROM articles WHERE id=?", (item,)).fetchone()
+            previous = conn.execute("SELECT kind,body,html,version,archive_root FROM articles WHERE id=?",
+                                    (item,)).fetchone()
             if item and (not previous or previous["version"] != version):
                 raise InputError("Пункт уже изменился. Откройте свежую версию перед сохранением.")
+            if previous and previous["archive_root"]:
+                raise InputError("Сначала восстановите пункт из архива.")
             kind = data.get("kind", previous["kind"] if previous else "article")
             if kind not in ("section", "article") or (previous and kind != previous["kind"]):
                 raise InputError("Выберите раздел или статью при создании.")
             height = 1
             if item:
-                height = conn.execute("""
-                    WITH RECURSIVE tree(id,depth) AS (SELECT ?,1 UNION ALL SELECT a.id,depth+1
-                        FROM articles a JOIN tree ON a.parent=tree.id) SELECT max(depth) FROM tree
-                """, (item,)).fetchone()[0]
+                height = conn.execute(SUBTREE + "SELECT max(depth) FROM subtree", (item,)).fetchone()[0]
             self.check_parent(conn, parent, item, height)
 
             references = None
@@ -305,6 +329,47 @@ class Knowledge:
             if references is not None or uploads:
                 self.save_media(conn, item, references or set(), uploads)
         return item
+
+    @staticmethod
+    def archive_record(conn, item, data):
+        version = number(data.get("version"), "Версия пункта", 1, 2**63-1)
+        row = conn.execute("""
+            SELECT a.archive_root,a.version,p.archive_root IS NOT NULL AS parent_archived
+            FROM articles a LEFT JOIN articles p ON p.id=a.parent WHERE a.id=?
+        """, (item,)).fetchone()
+        if not row or row["version"] != version:
+            raise InputError("Пункт уже изменился. Откройте свежую версию.")
+        return row
+
+    def set_archived(self, item, data):
+        archived = data.get("archived")
+        if type(archived) is not bool:
+            raise InputError("Выберите архивирование или восстановление.")
+        with self.db.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = self.archive_record(conn, item, data)
+            if archived:
+                if row["archive_root"]:
+                    raise InputError("Пункт уже в архиве.")
+                conn.execute(SUBTREE + """
+                    UPDATE articles SET archive_root=?,version=version+1
+                    WHERE archive_root IS NULL AND id IN (SELECT id FROM subtree)
+                """, (item, item))
+            else:
+                if row["parent_archived"]:
+                    raise InputError("Сначала восстановите родительский пункт из архива.")
+                if row["archive_root"] != item:
+                    raise InputError("Пункт уже в базе знаний.")
+                conn.execute("UPDATE articles SET archive_root=NULL,version=version+1 WHERE archive_root=?", (item,))
+
+    def delete(self, item, data):
+        with self.db.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if not self.archive_record(conn, item, data)["archive_root"]:
+                raise InputError("Сначала переместите пункт в архив.")
+            # Delete children first to satisfy the parent reference.
+            rows = conn.execute(SUBTREE + "SELECT id FROM subtree ORDER BY depth DESC", (item,)).fetchall()
+            conn.executemany("DELETE FROM articles WHERE id=?", rows)
 
     @staticmethod
     def save_media(conn, item, references, uploads):

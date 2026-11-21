@@ -11,7 +11,7 @@ from ..config import MSK
 from .access import PERMISSIONS
 from .inventory import ACTIONS, SERVICE_WARNING_DAYS, STATES, Inventory
 from .knowledge import DOCUMENT_LIMIT, MAX_MEDIA, MEDIA_ID, Knowledge
-from .media import article_media, photo_content
+from .media import DOWNLOAD_MIME, article_media, photo_content
 from .settings import InputError
 
 
@@ -81,7 +81,7 @@ def workspace_api(service, accounts):
     @api.get("/knowledge")
     @requires("knowledge.read")
     def articles():
-        return jsonify(items=knowledge.tree())
+        return jsonify(items=knowledge.tree(archived=request.args.get("archived") == "1"))
 
     @api.get("/knowledge/<item>")
     @requires("knowledge.read")
@@ -95,6 +95,18 @@ def workspace_api(service, accounts):
         data, uploads = uploaded_article()
         saved = knowledge.save(data, now().isoformat(timespec="seconds"), g.user["name"], item, uploads)
         return jsonify(id=saved), 200 if item else 201
+
+    @api.put("/knowledge/<item>/archive")
+    @requires("knowledge.write")
+    def article_archive(item):
+        knowledge.set_archived(item, request_data())
+        return jsonify(id=item)
+
+    @api.delete("/knowledge/<item>")
+    @requires("knowledge.write")
+    def article_delete(item):
+        knowledge.delete(item, request_data())
+        return jsonify(id=item)
 
     @api.post("/knowledge/import")
     @requires("knowledge.write")
@@ -122,13 +134,17 @@ def workspace_api(service, accounts):
         file = knowledge.media(item, media)
         if not file:
             abort(404)
+        if file["mime"] == DOWNLOAD_MIME:
+            return send_file(BytesIO(file["content"]), mimetype=DOWNLOAD_MIME,
+                             as_attachment=True, download_name=file["name"])
         return send_file(BytesIO(file["content"]), mimetype=file["mime"], conditional=True)
 
     @api.get("/inventory")
     @requires("inventory.read")
     def assets():
         today = now().date()
-        return jsonify(items=inventory.assets(today, request.args.get("employee")), states=STATES, actions=ACTIONS,
+        items = inventory.assets(today, request.args.get("employee"), archived=request.args.get("archived") == "1")
+        return jsonify(items=items, states=STATES, actions=ACTIONS,
                        today=today.isoformat(), service_warning_days=SERVICE_WARNING_DAYS)
 
     @api.get("/inventory/assignees")

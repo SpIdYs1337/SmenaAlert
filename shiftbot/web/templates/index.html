@@ -45,8 +45,8 @@
 
   {% set modules = [
     ('monitoring', 'Мониторинг', 'monitor.manage', [('overview', 'Обзор'), ('statistics', 'Статистика'), ('points', 'Торговые точки'), ('history', 'Журнал писем')]),
-    ('knowledge', 'База знаний', 'knowledge.read', [('knowledge', 'Содержание')]),
-    ('inventory', 'IT-инвентарь', 'inventory.read', [('inventory', 'Реестр техники')]),
+    ('knowledge', 'База знаний', 'knowledge.read', [('knowledge', 'Содержание'), ('knowledge-archive', 'Архив')]),
+    ('inventory', 'IT-инвентарь', 'inventory.read', [('inventory', 'Реестр техники'), ('inventory-archive', 'Списанные')]),
     ('admin', 'Администрирование', 'admin.manage', [('admin', 'Сотрудники')]),
     ('settings', 'Настройки', 'monitor.manage', [('people', 'Получатели'), ('iiko', 'Подключение iiko'), ('smtp', 'Отправка SMTP'), ('imap', 'Входящие IMAP'), ('monitor', 'Авторассылка')])
   ] %}

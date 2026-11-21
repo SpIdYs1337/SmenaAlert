@@ -388,6 +388,108 @@ class WorkspaceTests(unittest.TestCase):
         self.write(path, {**entry, "version":1, "html":"<p>Новая редакция</p>"}, method="PUT", expect=200)
         self.assertEqual(self.owner.get("/api/work/" + path + "/media/" + media).status_code,404)
 
+    def test_archive_restores_subtree_and_keeps_previously_archived_article(self):
+        root = self.write("knowledge", {"title": "Техника", "kind": "section"})["id"]
+        chapter = self.write("knowledge", {"title": "Приёмка", "kind": "section", "parent": root})["id"]
+        child = self.write("knowledge", {"title": "Инструкция", "parent": chapter})["id"]
+        old = self.write("knowledge", {"title": "Старая версия", "parent": chapter})["id"]
+
+        def archive(item, state, expect=200):
+            record = self.owner.get(f"/api/work/knowledge/{item}").json
+            self.write(f"knowledge/{item}/archive", {"archived": state, "version": record["version"]},
+                       method="PUT", expect=expect)
+
+        self.write(f"knowledge/{root}", {"version": 1}, method="DELETE", expect=400)
+        archive(old, True)
+        archive(root, True)
+        self.assertEqual(self.owner.get("/api/work/knowledge").json["items"], [])
+        rows = self.owner.get("/api/work/knowledge?archived=1").json["items"]
+        self.assertEqual({row["id"]: row["parent"] for row in rows},
+                         {root: None, chapter: root, child: chapter, old: chapter})
+        archive(child, False, expect=400)
+        archive(old, False, expect=400)
+        self.write("knowledge", {"title": "Новый", "parent": chapter}, expect=400)
+        self.write(f"knowledge/{child}", {"title": "Инструкция", "version": 2}, method="PUT", expect=400)
+        self.write(f"knowledge/{root}/archive", {"archived": False, "version": 1}, method="PUT", expect=400)
+        archive(root, False)
+        rows = self.owner.get("/api/work/knowledge").json["items"]
+        self.assertEqual([row["id"] for row in rows], [root, chapter, child])
+        rows = self.owner.get("/api/work/knowledge?archived=1").json["items"]
+        self.assertEqual([(row["id"], row["parent"]) for row in rows], [(old, None)])
+
+    def test_archived_section_deletion_removes_descendants_and_attachments(self):
+        root = self.write("knowledge", {"title": "Раздел", "kind": "section"})["id"]
+        imported = self.send_files("knowledge/import", {
+            "file": (io.BytesIO(b"# Procedure\nStep"), "guide.md"), "parent": root,
+        })["id"]
+        photo, file = "a12300a12345eeee", "a12300a12345eaaa"
+        article = json.dumps({"title": "Материалы", "parent": root,
+                              "html": '<p data-align="center">Текст</p><p data-align="invalid">Шаг</p>'
+                                      f'<figure data-media="{photo}" data-width="50" data-align="right"></figure>'
+                                      f'<figure data-media="{file}"></figure>'})
+        item = self.send_files("knowledge", {
+            "record": article, f"media:{photo}": (io.BytesIO(self.sample_photo()), "photo.png"),
+            f"media:{file}": (io.BytesIO(b"fixture"), "sample.pdf"),
+        })["id"]
+        data = self.owner.get(f"/api/work/knowledge/{item}").json
+        self.assertIn('data-align="center"', data["html"])
+        self.assertIn('data-align="right"', data["html"])
+        self.assertIn('data-width="50"', data["html"])
+        self.assertNotIn("invalid", data["html"])
+        self.write(f"knowledge/{root}/archive", {"archived": True, "version": 1}, method="PUT", expect=200)
+
+        self.staff("archive-reader")
+        reader, token = self.activate("archive-reader")
+        file_path = f"/api/work/knowledge/{item}/media/{file}"
+        download = reader.get(file_path)
+        self.assertEqual(download.data, b"fixture")
+        self.assertEqual(download.mimetype, "application/octet-stream")
+        self.assertEqual(download.headers["Content-Disposition"], "attachment; filename=sample.pdf")
+        self.write(f"knowledge/{root}", {"version": 2}, client=reader, token=token, method="DELETE", expect=403)
+        self.write(f"knowledge/{root}", {"version": 2}, method="DELETE", expect=200)
+        self.assertEqual(self.owner.get("/api/work/knowledge?archived=1").json["items"], [])
+        self.assertEqual(self.owner.get(f"/api/work/knowledge/{imported}/original").status_code, 404)
+        self.assertEqual(self.owner.get(file_path).status_code, 404)
+        with self.db.connection() as conn:
+            for table in ("articles", "documents", "article_media"):
+                self.assertEqual(conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0], 0)
+
+    def test_write_off_releases_device_and_preserves_history_in_archive(self):
+        employee = self.staff("holder", ["inventory.read"])
+        item = self.send_files("inventory", {
+            "tag": "ARCH-1", "name": "Терминал", "location": "Склад", "day": "2026-11-01",
+            "photo": (io.BytesIO(self.sample_photo()), "device.png"),
+        })["id"]
+        path = f"inventory/{item}"
+        row = self.owner.get("/api/work/" + path).json
+        self.write(path + "/events", {
+            "action": "assign", "employee": employee, "version": row["version"], "day": "2026-11-02",
+            "location": "Офис", "service_months": 24,
+        })
+        row = self.owner.get("/api/work/" + path).json
+        disposal = {"action": "write_off", "version": row["version"], "day": "2026-11-20"}
+        self.write(path + "/events", disposal, expect=400)
+        self.write(path + "/events", {**disposal, "day": "2026-11-01", "note": "Износ"}, expect=400)
+        self.write(path + "/events", {**disposal, "note": "Износ"})
+        self.write(path + "/events", {**disposal, "note": "Повтор"}, expect=400)
+        self.assertEqual(self.owner.get("/api/work/inventory").json["items"], [])
+        archived = self.owner.get("/api/work/inventory?archived=1").json["items"]
+        self.assertEqual([(asset["id"], asset["state"], asset["note"]) for asset in archived],
+                         [(item, "written_off", "Износ")])
+        holder, _ = self.activate("holder")
+        self.assertEqual(holder.get("/api/work/profile").json["assigned"], [])
+        self.assertEqual(holder.get("/api/work/" + path + "/photo").mimetype, "image/webp")
+        row = holder.get("/api/work/" + path).json
+        self.assertEqual([event["action"] for event in row["events"]], ["write_off", "assign", "receive"])
+        self.assertIsNone(row["events"][0]["employee"])
+        self.assertEqual(row["events"][0]["location"], "Офис")
+        self.assertEqual(row["events"][1]["employee"], employee)
+        self.write(path + "/events", {"action": "return", "version": row["version"], "day": "2026-11-20"},
+                   expect=400)
+        self.write(path + "/service", {"service_months": 36, "service_revision": row["service_revision"]},
+                   method="PUT", expect=400)
+        self.write(path + "/photo", {}, method="DELETE", expect=400)
+
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is needed for real videos")
     def test_video_duration_is_validated_on_the_server_and_streams_by_range(self):
         def clip(seconds):
