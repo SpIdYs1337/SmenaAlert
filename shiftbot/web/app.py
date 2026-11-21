@@ -7,12 +7,17 @@ import threading
 from datetime import date, timedelta
 from time import monotonic
 
-from flask import Flask, abort, jsonify, redirect, render_template, request, session, url_for
+from flask import Flask, abort, g, jsonify, redirect, render_template, request, session, url_for
 from werkzeug.exceptions import HTTPException
+from werkzeug.security import generate_password_hash
 
 from .. import __version__
 from ..config import ConfigError, MSK
 from ..iiko import IikoError
+from .access import Accounts
+from .knowledge import DOCUMENT_LIMIT, KNOWLEDGE_JSON_LIMIT, MAX_MEDIA
+from .media import ARTICLE_REQUEST_LIMIT, PHOTO_REQUEST_LIMIT
+from .workspace import request_data, workspace_api
 from .mail import MailError
 from .service import Service, can_check_receipt
 from .settings import InputError, email_address, flag, iiko_settings, list_ids, number, point_settings, smtp_settings, text
@@ -25,32 +30,54 @@ def same(left: str, right: str) -> bool:
 
 def create_app(service: Service, *, admin: str, password: str, secure_cookie=False, demo=False) -> Flask:
     app = Flask(__name__)
-    app.jinja_env.globals.update(panel_name="iiko-Контроль смены", panel_version=__version__)
+    app.jinja_env.globals.update(panel_name="Uppetit IT", panel_version=__version__)
     app.secret_key = service.vault.session_key(admin, password)
     app.config.update(SESSION_COOKIE_NAME="shift_monitor", SESSION_COOKIE_HTTPONLY=True,
                       SESSION_COOKIE_SAMESITE="Strict", SESSION_COOKIE_SECURE=secure_cookie,
                       PERMANENT_SESSION_LIFETIME=timedelta(hours=12), MAX_CONTENT_LENGTH=128 * 1024)
     db = service.db
+    accounts = Accounts(db, admin)
+    app.register_blueprint(workspace_api(service, accounts))
+    dummy_hash = generate_password_hash(secrets.token_urlsafe(32))
     failures: dict[str, list[float]] = {}
     login_lock = threading.Lock()
 
     def token():
         return session.setdefault("csrf", secrets.token_urlsafe(32))
 
-    def data():
-        payload = request.get_json(silent=True)
-        if not isinstance(payload, dict):
-            raise InputError("Не удалось прочитать данные формы.")
-        return payload
+    def identity():
+        if demo or session.get("admin") == admin:
+            return accounts.owner
+        user = accounts.get(session["employee"]) if session.get("employee") else None
+        if user and user["active"] and user["login_enabled"] and session.get("version") == user["version"]:
+            return user
+        return None
 
     @app.before_request
-    def require_admin():
+    def require_access():
+        if request.endpoint == "work.article_import":
+            request.max_content_length = DOCUMENT_LIMIT + 128 * 1024
+        elif request.endpoint == "work.article_save":
+            request.max_content_length = (ARTICLE_REQUEST_LIMIT if request.mimetype == "multipart/form-data"
+                                          else KNOWLEDGE_JSON_LIMIT)
+            request.max_form_memory_size = KNOWLEDGE_JSON_LIMIT
+            request.max_form_parts = MAX_MEDIA + 1
+        elif request.endpoint in {"work.receive", "work.update_photo"} and request.mimetype == "multipart/form-data":
+            request.max_content_length = PHOTO_REQUEST_LIMIT
         if request.endpoint in {"login", "static", "health"}:
             return
-        if not demo and session.get("admin") != admin:
+        g.user = identity()
+        if not g.user:
             if request.path.startswith("/api/"):
                 return jsonify(error="Сессия завершена. Войдите в панель заново."), 401
             return redirect(url_for("login"))
+        if g.user["must_change"] and request.endpoint not in {"change_password", "logout"}:
+            if request.path.startswith("/api/"):
+                return jsonify(error="Задайте собственный пароль при первом входе."), 403
+            return redirect(url_for("change_password"))
+        shared = {"index", "logout", "change_password", "dashboard"}
+        if request.blueprint != "work" and request.endpoint not in shared and "monitor.manage" not in g.user["grants"]:
+            abort(403)
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
             supplied = request.headers.get("X-CSRF-Token", "") or request.form.get("csrf", "")
             if not session.get("csrf") or not same(session["csrf"], supplied):
@@ -61,7 +88,8 @@ def create_app(service: Service, *, admin: str, password: str, secure_cookie=Fal
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "same-origin"
         response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:"
+            "default-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; "
+            "img-src 'self' data: blob:; media-src 'self' blob:"
         )
         if request.endpoint != "static":
             response.headers["Cache-Control"] = "no-store"
@@ -79,26 +107,31 @@ def create_app(service: Service, *, admin: str, password: str, secure_cookie=Fal
 
     @app.errorhandler(sqlite3.IntegrityError)
     def conflict(error):
-        message = "Такой адрес уже есть в списке получателей." if "people.email" in str(error) else \
-            "Связанная запись недоступна. Обновите страницу и проверьте настройки."
+        messages = {"people.email": "Такой адрес уже есть в списке получателей.",
+                    "employees.login_key": "Этот логин уже занят.",
+                    "assets.tag_key": "Техника с таким инвентарным номером уже принята."}
+        message = next((value for key, value in messages.items() if key in str(error)),
+                       "Связанная запись недоступна. Обновите страницу и проверьте настройки.")
         return jsonify(error=message), 409
 
     @app.errorhandler(HTTPException)
     def http_error(error):
         if request.path.startswith("/api/"):
-            return jsonify(error="Запись не найдена." if error.code == 404 else "Запрос не удалось выполнить."), error.code
+            messages = {403: "Недостаточно прав.", 404: "Запись не найдена.", 413: "Слишком большой запрос или файл."}
+            return jsonify(error=messages.get(error.code, "Запрос не удалось выполнить.")), error.code
         return error
 
     @app.route("/login", methods=["GET", "POST"])
     def login():
-        if demo or session.get("admin") == admin:
+        if identity():
             return redirect(url_for("index"))
         error, status = None, 200
         if request.method == "POST":
             if not same(token(), request.form.get("csrf", "")):
                 return render_template("login.html", csrf=token(), error="Обновите страницу и повторите вход."), 403
             addr, now = request.remote_addr or "local", monotonic()
-            valid = same(request.form.get("login", ""), admin) & same(request.form.get("password", ""), password)
+            login_name = request.form.get("login", "")
+            entered = request.form.get("password", "")
             with login_lock:
                 for source in list(failures):
                     attempts = [attempt for attempt in failures[source] if now - attempt < 300]
@@ -108,16 +141,44 @@ def create_app(service: Service, *, admin: str, password: str, secure_cookie=Fal
                         del failures[source]
                 if len(failures.get(addr, [])) >= 8:
                     error, status = "Слишком много попыток. Попробуйте через пять минут.", 429
-                elif valid:
+                    return render_template("login.html", csrf=token(), error=error), status
+                failures.setdefault(addr, []).append(now)
+            owner = same(login_name, admin) and same(entered, password)
+            employee = None
+            if not owner and len(login_name) <= 120 and len(entered) <= 256:
+                employee = accounts.authenticate(login_name, entered, dummy_hash)
+            if owner or employee:
+                with login_lock:
                     failures.pop(addr, None)
-                    session.clear()
+                session.clear()
+                if owner:
                     session["admin"] = admin
-                    session.permanent = True
-                    return redirect(url_for("index"))
                 else:
-                    failures.setdefault(addr, []).append(now)
-                    error, status = "Проверьте логин и пароль.", 401
+                    session["employee"], session["version"] = employee
+                session.permanent = True
+                return redirect(url_for("index"))
+            error, status = "Проверьте логин и пароль.", 401
         return render_template("login.html", csrf=token(), error=error), status
+
+    @app.route("/account/password", methods=["GET", "POST"])
+    def change_password():
+        if g.user["id"] == accounts.owner["id"]:
+            return redirect(url_for("index"))
+        error = None
+        if request.method == "POST":
+            try:
+                new = request.form.get("new_password", "")
+                if new != request.form.get("confirm_password", ""):
+                    raise InputError("Новый пароль и подтверждение должны совпадать.")
+                version = accounts.change_password(g.user["id"], g.user["version"], request.form.get("password", ""), new)
+            except InputError as exc:
+                error = str(exc)
+            else:
+                session.clear()
+                session["employee"], session["version"] = g.user["id"], version
+                session.permanent = True
+                return redirect(url_for("index"))
+        return render_template("password.html", csrf=token(), error=error, first=g.user["must_change"]), 400 if error else 200
 
     @app.post("/logout")
     def logout():
@@ -130,10 +191,12 @@ def create_app(service: Service, *, admin: str, password: str, secure_cookie=Fal
 
     @app.get("/")
     def index():
-        return render_template("index.html", csrf=token(), admin=admin, demo=demo)
+        return render_template("index.html", csrf=token(), admin=g.user["name"], user=g.user, demo=demo)
 
     @app.get("/api/dashboard")
     def dashboard():
+        if "monitor.manage" not in g.user["grants"]:
+            return jsonify(now=service.now().isoformat())
         return jsonify(service.snapshot())
 
     @app.get("/api/statistics")
@@ -158,7 +221,7 @@ def create_app(service: Service, *, admin: str, password: str, secure_cookie=Fal
 
     @app.put("/api/smtp")
     def save_smtp():
-        db.save_setting("smtp", smtp_settings(data(), db.get_setting("smtp", {}), service.vault))
+        db.save_setting("smtp", smtp_settings(request_data(), db.get_setting("smtp", {}), service.vault))
         db.save_setting("health:smtp", None)
         return jsonify(ok=True)
 
@@ -169,12 +232,12 @@ def create_app(service: Service, *, admin: str, password: str, secure_cookie=Fal
 
     @app.post("/api/smtp/test")
     def test_smtp():
-        job_id = service.queue_test(email_address(data().get("email")))
+        job_id = service.queue_test(email_address(request_data().get("email")))
         return jsonify(id=job_id), 202
 
     @app.put("/api/imap")
     def save_imap():
-        service.call(service.save_imap, data())
+        service.call(service.save_imap, request_data())
         return jsonify(ok=True)
 
     @app.post("/api/imap/probe")
@@ -214,14 +277,14 @@ def create_app(service: Service, *, admin: str, password: str, secure_cookie=Fal
 
     @app.post("/api/check")
     def check():
-        point_id = data().get("point")
+        point_id = request_data().get("point")
         if point_id is not None and (not isinstance(point_id, str) or not db.get("points", point_id)):
             abort(404)
         return jsonify(checked=service.call(service.check, True, point_id))
 
     @app.put("/api/monitor")
     def preferences():
-        payload = data()
+        payload = request_data()
         previous = db.preferences()
         settings = {"enabled": flag(payload, "enabled", previous["enabled"]),
                     "inclusive": flag(payload, "inclusive", previous["inclusive"]),
@@ -237,7 +300,7 @@ def create_app(service: Service, *, admin: str, password: str, secure_cookie=Fal
     @app.post("/api/points/<point_id>/preview")
     @app.post("/api/points/<point_id>/send")
     def manual_letter(point_id):
-        payload = data()
+        payload = request_data()
         note = payload.get("note", "")
         if not isinstance(note, str) or len(note) > 2000 or "\0" in note:
             raise InputError("Комментарий должен содержать до 2000 символов.")
@@ -258,7 +321,7 @@ def create_app(service: Service, *, admin: str, password: str, secure_cookie=Fal
         if request.method == "DELETE":
             db.delete(entity, item_id)
             return jsonify(ok=True)
-        payload, links = data(), None
+        payload, links = request_data(), None
         if entity == "servers":
             value = iiko_settings(payload, before, service.vault)
         elif entity == "points":
