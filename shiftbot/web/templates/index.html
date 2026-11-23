@@ -76,7 +76,10 @@
         {% endif %}
       </nav>
       {% endfor %}
-      <nav class="section-nav" data-section="account" aria-label="Учётная запись" hidden><a href="#account" data-page="account">Мой профиль</a></nav>
+      <nav class="section-nav" data-section="account" aria-label="Учётная запись" hidden>
+        <a href="#account" data-page="account">Мой профиль</a>
+        <a href="{{ url_for('landing') }}">О проекте</a>
+      </nav>
       <div class="top-end">
         {% if demo %}<span class="demo-label">Демо-данные</span>{% endif %}
         {% if 'monitor.manage' in user.grants %}<a class="mode" id="mode" href="#monitor"></a>{% endif %}

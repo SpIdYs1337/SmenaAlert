@@ -67,6 +67,8 @@ def create_app(service: Service, *, admin: str, password: str, secure_cookie=Fal
         if request.endpoint in {"login", "static", "health"}:
             return
         g.user = identity()
+        if request.endpoint == "landing" or (request.endpoint == "index" and not g.user):
+            return
         if not g.user:
             if request.path.startswith("/api/"):
                 return jsonify(error="Сессия завершена. Войдите в панель заново."), 401
@@ -189,8 +191,14 @@ def create_app(service: Service, *, admin: str, password: str, secure_cookie=Fal
     def health():
         return "ok\n"
 
+    @app.get("/about")
+    def landing():
+        return render_template("landing.html", signed_in=bool(g.user))
+
     @app.get("/")
     def index():
+        if not g.user:
+            return landing()
         return render_template("index.html", csrf=token(), admin=g.user["name"], user=g.user, demo=demo)
 
     @app.get("/api/dashboard")
