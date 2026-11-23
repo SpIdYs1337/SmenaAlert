@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="{{ panel_name }} — мониторинг кассовых смен iiko, учёт техники, база знаний и управление доступом сотрудников.">
+  <title>{{ panel_name }} — о проекте</title>
+  <link rel="icon" href="{{ url_for('static', filename='uppetit-mark.png', v=panel_version) }}" type="image/png">
+  <link rel="stylesheet" href="{{ url_for('static', filename='landing.css', v=panel_version) }}">
+  <script src="{{ url_for('static', filename='landing.js', v=panel_version) }}" defer></script>
+  {% set entry_url = url_for('index' if signed_in else 'login') %}
+  {% set entry_text = 'Открыть панель' if signed_in else 'Войти в панель' %}
+</head>
+<body>
+<div class="landing" id="top">
+  <a class="skip-link" id="skip-content" href="#content">К содержанию</a>
+  <header class="site-header">
+    <div class="shell topbar">
+      <a class="wordmark" id="header-logo" href="#top"><img src="{{ url_for('static', filename='uppetit-mark.png', v=panel_version) }}" alt="" width="32" height="32">{{ panel_name }}</a>
+      <nav aria-label="По странице">
+        <a id="nav-features" href="#features">Возможности</a>
+        <a id="nav-process" href="#process">Как работает</a>
+        <a id="nav-start" href="#start">Как начать</a>
+      </nav>
+      <a class="cta cta-small" id="header-start" href="{{ entry_url }}">{{ entry_text }} <svg class="landing-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19 19 5M10 5h9v9"/></svg></a>
+    </div>
+  </header>
+
+  <main id="content" tabindex="-1">
+    <section class="shell hero" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <h1 id="hero-title">Открытия точек,<br class="hero-break"> техника и <em>знания</em></h1>
+        <p>{{ panel_name }} помогает сети следить за кассовыми сменами в iiko, вести учёт оборудования и хранить рабочие инструкции.</p>
+        <a class="cta cta-primary" id="hero-features" href="#features">Изучить возможности <svg class="landing-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14m-6-6 6 6 6-6"/></svg></a>
+      </div>
+    </section>
+
+    <section class="shell feature-section" id="features" aria-labelledby="features-title" data-reveal>
+      <h2 id="features-title">Что внутри {{ panel_name }}</h2>
+      <div class="showcase" data-tabs>
+        <div class="tab-list" aria-label="Разделы проекта" hidden>
+          <button id="tab-shifts" class="module-tab" type="button" aria-controls="shifts">
+            <span class="module-icon mint"><svg class="landing-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4v16h16M8 16v-4m4 4V7m4 9v-7m4 7V4"/></svg></span>
+            <span><strong>Мониторинг</strong><small>График, факт и оповещения</small></span><svg class="landing-icon chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+          </button>
+          <button id="tab-inventory" class="module-tab" type="button" aria-controls="inventory">
+            <span class="module-icon blush"><svg class="landing-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="13" rx="2"/><path d="M8 21h8m-4-5v5"/></svg></span>
+            <span><strong>IT-инвентарь</strong><small>Устройства и их история</small></span><svg class="landing-icon chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+          </button>
+          <button id="tab-knowledge" class="module-tab" type="button" aria-controls="knowledge">
+            <span class="module-icon sand"><svg class="landing-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6c-3-2-6-2-10-1v14c4-1 7-1 10 1 3-2 6-2 10-1V5c-4-1-7-1-10 1v14"/></svg></span>
+            <span><strong>База знаний</strong><small>Памятки и инструкции</small></span><svg class="landing-icon chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+          </button>
+          <button id="tab-access" class="module-tab" type="button" aria-controls="access">
+            <span class="module-icon blue"><svg class="landing-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2m20 0v-2a4 4 0 0 0-3-3.9M16 3a4 4 0 0 1 0 8"/><circle cx="9" cy="7" r="4"/></svg></span>
+            <span><strong>Администрирование</strong><small>Сотрудники и права доступа</small></span><svg class="landing-icon chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+          </button>
+        </div>
+
+        <div class="feature-stage">
+          <article id="shifts" class="feature-panel">
+            <div class="example-head"><div><h3>Открытия за день</h3><p>Мониторинг кассовых смен</p></div><span class="sample">Пример</span></div>
+            <ul class="example-list shift-list" aria-label="Пример результатов проверки">
+              <li><strong>Точка на Площади</strong><small>График 09:00 · факт 08:58</small><span class="status-pill good">Вовремя</span></li>
+              <li><strong>Точка у вокзала</strong><small>График 09:00 · факт 09:08</small><span class="status-pill late">Опоздание</span></li>
+              <li><strong>Точка в центре</strong><small>График 09:00 · смены нет</small><span class="status-pill miss">Не открыта</span></li>
+            </ul>
+            <p class="panel-foot">Сверяйте время открытия с графиком и смотрите статистику по точкам и дням.</p>
+          </article>
+
+          <article id="inventory" class="feature-panel">
+            <div class="example-head"><div><h3>Кассовый терминал</h3><p>IT-024 · карточка техники</p></div><span class="sample">Пример</span></div>
+            <dl class="example-list fact-list">
+              <div><dt>Состояние</dt><dd><span class="status-pill good">В эксплуатации</span></dd></div>
+              <div><dt>Текущее место</dt><dd>Точка на Площади</dd></div>
+              <div><dt>Гарантия</dt><dd>12 мес. от даты покупки</dd></div>
+              <div><dt>История</dt><dd>Склад → Точка на Площади</dd></div>
+            </dl>
+            <p class="panel-foot">От приёмки до списания. Фиксируйте гарантию, перемещения, ответственных и скачивайте акты.</p>
+          </article>
+
+          <article id="knowledge" class="feature-panel">
+            <div class="example-head"><div><h3>Рабочие инструкции</h3><p>База знаний сети</p></div><span class="sample">Пример</span></div>
+            <div class="example-list chapter-list">
+              <details open><summary>Подготовка кассы к открытию</summary><ol><li>Проверьте подключение терминала.</li><li>Откройте кассовую смену в iikoFront.</li></ol></details>
+              <details><summary>Как оформить выдачу техники</summary><p>Откройте карточку устройства, выберите сотрудника и скачайте акт.</p></details>
+            </div>
+            <p class="panel-foot">Собирайте статьи по разделам, импортируйте документы и добавляйте фото или короткие видео.</p>
+          </article>
+
+          <article id="access" class="feature-panel">
+            <div class="example-head"><div><h3>Карточка сотрудника</h3><p>Доступ к разделам {{ panel_name }}</p></div><span class="sample">Пример</span></div>
+            <dl class="example-list fact-list">
+              <div><dt>IT-инвентарь</dt><dd><span class="status-pill good">Редактирование</span></dd></div>
+              <div><dt>База знаний</dt><dd><span class="status-pill neutral">Чтение</span></dd></div>
+              <div><dt>Учётная запись</dt><dd>Пароль задаётся при первом входе</dd></div>
+            </dl>
+            <p class="panel-foot">Выдавайте доступ по роли. Сотрудника можно добавить для учёта техники без учётной записи.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="process-section" id="process" aria-labelledby="process-title">
+      <div class="shell process-inner" data-reveal>
+        <div>
+          <h2 id="process-title">Как проходит проверка смены</h2>
+          <p>На примере точки с открытием в 09:00 МСК.</p>
+        </div>
+        <ol class="timeline">
+          <li><span class="step-icon"><svg class="landing-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4m-5 3h18"/></svg></span><div><strong>09:00 · Открытие по графику</strong><p>У каждой точки свой график и разовые изменения.</p></div></li>
+          <li><span class="step-icon"><svg class="landing-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span><div><strong>09:15 · Запрос в iiko</strong><p>Через 15 минут панель получает фактическое время открытия.</p></div></li>
+          <li><span class="step-icon"><svg class="landing-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg></span><div><strong>После проверки · Письмо ответственному</strong><p>Оповещение приходит при опоздании или если смена ещё не открыта.</p></div></li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="shell start-section" id="start" aria-labelledby="start-title" data-reveal>
+      <div class="start-card">
+        <div><h2 id="start-title">Как начать работу</h2><p>Получите логин и временный пароль у администратора. При первом входе задайте пароль, затем откройте нужный раздел в верхнем меню.</p></div>
+        <a class="cta cta-primary" id="start-panel" href="{{ entry_url }}">{{ entry_text }} <svg class="landing-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19 19 5M10 5h9v9"/></svg></a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="shell site-footer">
+    <a class="wordmark footer-mark" id="footer-logo" href="#top"><img src="{{ url_for('static', filename='uppetit-mark.png', v=panel_version) }}" alt="" width="28" height="28">{{ panel_name }}</a>
+    <a class="top-link" id="footer-top" href="#top">В начало <svg class="landing-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></a>
+  </footer>
+</div>
+</body>
+</html>

@@ -12,7 +12,8 @@ from waitress import serve
 
 from ..config import ConfigError, load_env
 from .app import create_app
-from .demo import DemoIiko, DemoMail, demo_now, seed
+from .demo import DemoIiko, DemoMail, demo_now, seed, seed_workspace
+from .media import ARTICLE_REQUEST_LIMIT
 from .service import Service
 from .settings import Vault
 from .storage import Database
@@ -34,6 +35,7 @@ def start(directory: Path, args, admin: str, password: str):
             mail = DemoMail()
             service = Service(db, vault, mailer=mail, mailbox=mail, iiko_factory=DemoIiko, now=demo_now)
             seed(service)
+            seed_workspace(service)
         else:
             service = Service(db, vault)
         app = create_app(service, admin=admin, password=password, demo=args.demo,
@@ -42,7 +44,7 @@ def start(directory: Path, args, admin: str, password: str):
         previous_handler = signal.signal(signal.SIGTERM, interrupt_server)
         try:
             serve(app, host=args.host, port=args.port, threads=8, channel_timeout=60,
-                  max_request_body_size=128 * 1024, ident="shift-panel")
+                  max_request_body_size=ARTICLE_REQUEST_LIMIT, ident="shift-panel")
         except KeyboardInterrupt:
             pass
         finally:
@@ -51,7 +53,7 @@ def start(directory: Path, args, admin: str, password: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Веб-панель iiko с SMTP и IMAP")
+    parser = argparse.ArgumentParser(description="Веб-панель Uppetit IT")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--data-dir", default="data")

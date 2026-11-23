@@ -47,9 +47,65 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS deliveries_ready ON deliveries(status,retry_at,id);
             """)
+            db.executescript(Path(__file__).with_name("workspace.sql").read_text(encoding="utf-8"))
             db.execute("BEGIN IMMEDIATE")
-            if not any(column["name"] == "message_id" for column in db.execute("PRAGMA table_info(deliveries)")):
-                db.execute("ALTER TABLE deliveries ADD COLUMN message_id TEXT")
+            migrations = {
+                "deliveries": {"message_id": "TEXT"},
+                "employees": {"login_enabled": "INTEGER NOT NULL DEFAULT 1 CHECK(login_enabled IN (0,1))"},
+                "articles": {
+                    "kind": "TEXT NOT NULL DEFAULT 'article' CHECK(kind IN ('section','article'))",
+                    "html": "TEXT",
+                    "archive_root": "TEXT REFERENCES articles(id)",
+                },
+                "assets": {
+                    "service_months": "INTEGER CHECK(service_months BETWEEN 1 AND 600)",
+                    "service_revision": "INTEGER NOT NULL DEFAULT 0",
+                    "purchased_on": "TEXT",
+                    "warranty_months": "INTEGER CHECK(warranty_months BETWEEN 0 AND 600)",
+                    "edit_revision": "INTEGER NOT NULL DEFAULT 0",
+                },
+            }
+            for table, columns in migrations.items():
+                existing = {column["name"] for column in db.execute(f"PRAGMA table_info({table})")}
+                for column, definition in columns.items():
+                    if column not in existing:
+                        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            self._migrate_asset_events(db)
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS asset_acts (
+                    event INTEGER PRIMARY KEY REFERENCES asset_events(id) ON DELETE CASCADE,
+                    content BLOB NOT NULL
+                )
+            """)
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS asset_event_edits (
+                    id INTEGER PRIMARY KEY,
+                    event INTEGER NOT NULL REFERENCES asset_events(id),
+                    previous TEXT NOT NULL,
+                    edited_at TEXT NOT NULL,
+                    editor TEXT NOT NULL,
+                    editor_name TEXT NOT NULL
+                )
+            """)
+            db.execute("CREATE INDEX IF NOT EXISTS asset_event_edits_event ON asset_event_edits(event,id)")
+
+    @staticmethod
+    def _migrate_asset_events(db):
+        schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='asset_events'").fetchone()
+        previous_schema = schema and "'write_off'" not in schema["sql"]
+        if previous_schema:
+            columns = {column["name"] for column in db.execute("PRAGMA table_info(asset_events)")}
+            location = "location" if "location" in columns else "''"
+            db.execute("ALTER TABLE asset_events RENAME TO asset_events_previous")
+        db.execute(Path(__file__).with_name("asset_events.sql").read_text(encoding="utf-8"))
+        if previous_schema:
+            db.execute(f"""
+                INSERT INTO asset_events(id,asset,action,state,employee,employee_name,day,recorded_at,actor,actor_name,note,location)
+                SELECT id,asset,action,state,employee,employee_name,day,recorded_at,actor,actor_name,note,{location}
+                FROM asset_events_previous
+            """)
+            db.execute("DROP TABLE asset_events_previous")
+        db.execute("CREATE INDEX IF NOT EXISTS asset_events_asset ON asset_events(asset,id)")
 
     @contextmanager
     def connection(self):

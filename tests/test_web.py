@@ -93,6 +93,19 @@ class WebPanelTests(unittest.TestCase):
         page = self.client.get("/").get_data(as_text=True)
         self.token = re.search('name="csrf" content="([^"]+)"', page)[1]
 
+    def test_landing_before_login_has_no_workspace_access(self):
+        for path in ("/", "/about"):
+            response = self.client.get(path)
+            self.assertEqual(response.status_code, 200)
+            page = response.get_data(as_text=True)
+            self.assertIn('id="header-start" href="/login"', page)
+            self.assertIn('id="tab-inventory"', page)
+            self.assertNotIn('name="csrf"', page)
+        self.assertEqual(self.client.get("/api/work/inventory").status_code, 401)
+        self.login()
+        self.assertIn('id="header-start" href="/"', self.client.get("/about").get_data(as_text=True))
+        self.assertIn('id="module-menu"', self.client.get("/").get_data(as_text=True))
+
     def write(self, method, path, data, expected=200):
         response = self.client.open("/api" + path, method=method, json=data, headers={"X-CSRF-Token": self.token})
         self.assertEqual(response.status_code, expected, response.get_data(as_text=True))

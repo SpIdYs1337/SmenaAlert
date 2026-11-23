@@ -5,9 +5,12 @@ const drawer = document.querySelector("#drawer");
 const csrf = document.querySelector("[name=csrf]").content;
 const demo = document.body.dataset.demo === "yes";
 const panelName = document.body.dataset.panelName;
+const grants = new Set(document.body.dataset.grants.split(" "));
 const labels = {
+  knowledge: "База знаний", inventory: "IT-инвентарь", admin: "Администрирование", account: "Мой профиль",
+  "knowledge-archive": "Архив базы знаний", "inventory-archive": "Архив списанной техники",
   overview: "Обзор", statistics: "Статистика", points: "Торговые точки", history: "Журнал писем",
-  people: "Получатели", iiko: "Подключение iiko", smtp: "Почта", monitor: "Авторассылка",
+  people: "Получатели", iiko: "Подключение iiko", smtp: "Почта · SMTP", imap: "Почта · IMAP", monitor: "Авторассылка",
 };
 const statusLabels = {
   on_time: ["Вовремя", "green", "check-circle"], late_open: ["Открыта поздно", "amber", "clock"],
@@ -22,8 +25,9 @@ const mailStates = {
 const mailKinds = {auto: "Оповещение", followup: "Уточнение", manual: "Вручную", test: "Тест"};
 const pointPriority = ["not_open", "api_error", "late_open", "waiting", "unknown", "on_time", "day_off", "paused"];
 const days = {mon: "Понедельник", tue: "Вторник", wed: "Среда", thu: "Четверг", fri: "Пятница", sat: "Суббота", sun: "Воскресенье"};
-const ui = {page: "overview", snapshot: null, query: "", filter: "all", statistics: {days: "7", point: ""}};
+const ui = {page: "overview", snapshot: null, query: "", filter: "all", currentPoint: "", statistics: {days: "7", point: ""}};
 let statisticsRequest = 0;
+let statisticsDayRequest = 0;
 const timeFormat = new Intl.DateTimeFormat("ru-RU", {timeZone: "Europe/Moscow", hour: "2-digit", minute: "2-digit"});
 const dateFormat = new Intl.DateTimeFormat("ru-RU", {timeZone: "Europe/Moscow", day: "numeric", month: "long", year: "numeric"});
 const dateTimeFormat = new Intl.DateTimeFormat("ru-RU", {
@@ -36,6 +40,20 @@ const openingOutcomes = [
   ["on_time", "Вовремя", "green"], ["late_open", "С опозданием", "amber"],
   ["not_open", "Без открытия", "red"], ["api_error", "Ошибка iiko", "blue"],
 ];
+const statisticsNames = new Intl.Collator("ru-RU", {numeric: true, sensitivity: "base"});
+const statisticsTimeColumns = new Set(["deadline", "opened_at", "checked_at"]);
+const statisticsTables = {
+  points: {
+    columns: [["name", "Точка"], ...openingOutcomes.map(([key, title]) => [key, title]),
+      ["on_time_percent", "Доля вовремя"], ["average_delay_seconds", "Среднее опоздание"]],
+    column: "name", descending: false, rows: [], renderRows: statisticsPointRows,
+  },
+  day: {
+    columns: [["name", "Точка"], ["deadline", "По графику"], ["opened_at", "Фактическое открытие"],
+      ["status", "Статус"], ["delay_seconds", "Опоздание"], ["checked_at", "Время проверки"]],
+    column: "name", descending: false, rows: [], renderRows: statisticsDayRows,
+  },
+};
 
 function esc(value) {
   const chars = {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"};
@@ -77,11 +95,11 @@ function toast(message, error = false) {
 async function api(path, method = "GET", body) {
   const headers = {Accept: "application/json"};
   if (method !== "GET") {
-    headers["Content-Type"] = "application/json";
+    if (!(body instanceof FormData)) headers["Content-Type"] = "application/json";
     headers["X-CSRF-Token"] = csrf;
   }
   const response = await fetch(`/api${path}`, {
-    method, headers, body: method === "GET" ? undefined : JSON.stringify(body ?? {}),
+    method, headers, body: method === "GET" ? undefined : body instanceof FormData ? body : JSON.stringify(body ?? {}),
   });
   if (response.status === 401) {
     location.assign("/login");
@@ -96,22 +114,26 @@ async function refresh(renderPage = true) {
   if (renderPage) {
     render();
     if (ui.page === "statistics") await loadStatistics();
+    if (isWorkPage(ui.page)) await loadWork();
   }
   return ui.snapshot;
 }
 function route() {
-  const hash = location.hash.slice(1);
-  const next = Object.hasOwn(labels, hash) ? hash : "overview";
+  const [hash, record] = location.hash.slice(1).split("/");
+  const permitted = Array.from(document.querySelectorAll("a[data-page]"), link => link.dataset.page);
+  const next = permitted.includes(hash) ? hash : permitted.find(page => page !== "account") || "account";
+  if (/^[a-f0-9]{16}$/.test(record || "") && isWorkPage(next)) work.selection[next] = record;
   const navigating = next !== ui.page;
   if (navigating) {
+    if (drawer.open) drawer.close();
     ui.page = next;
     ui.query = "";
     ui.filter = "all";
   }
-  document.querySelector("#sidebar").classList.remove("open");
-  document.querySelector("#mobile-nav").setAttribute("aria-expanded", "false");
+  closeModuleMenu();
   if (ui.snapshot) render();
   if (ui.snapshot && next === "statistics") loadStatistics();
+  if (ui.snapshot && isWorkPage(next)) loadWork(navigating || work.page !== next || !work.data, Boolean(record));
   if (ui.snapshot && navigating && next === "history") {
     refresh(false).then(() => {
       if (ui.page === "history") render();
@@ -120,20 +142,49 @@ function route() {
     });
   }
 }
+function focusRecord() {
+  const card = content.querySelector(".record-detail");
+  if (!card) return;
+  card.focus({preventScroll: true});
+  if (window.matchMedia("(max-width: 860px)").matches) card.scrollIntoView({block: "start"});
+}
+function returnToRecords() {
+  const list = content.querySelector(".record-layout > .card");
+  if (!list) return;
+  const control = list.querySelector('[aria-pressed="true"], input[type="search"]');
+  if (control) control.focus({preventScroll: true});
+  list.scrollIntoView({block: "start"});
+}
+function listButton() {
+  return button("list-return", "К списку", {kind:"list-return"});
+}
+function closeModuleMenu() {
+  document.querySelector("#module-menu").classList.remove("open");
+  document.querySelector("#mobile-nav").setAttribute("aria-expanded", "false");
+}
 function render() {
   const pages = {overview: pointsPage, statistics: statisticsPage, points: pointsPage, people: peoplePage, history: historyPage,
-    iiko: iikoPage, smtp: mailPage, monitor: monitorPage};
-  for (const link of document.querySelectorAll(".nav [data-page]")) {
-    if (link.dataset.page === ui.page) link.setAttribute("aria-current", "page");
+    iiko: iikoPage, smtp: mailPage, imap: mailPage, monitor: monitorPage};
+  const tab = document.querySelector(`.section-nav [data-page="${ui.page}"]`);
+  const section = tab.closest(".section-nav");
+  for (const group of document.querySelectorAll(".section-nav")) group.hidden = group !== section;
+  for (const link of document.querySelectorAll("a[data-page]")) {
+    if (link.dataset.module === section.dataset.section) link.setAttribute("aria-current", "location");
+    else if (!link.dataset.module && link.dataset.page === ui.page) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
   }
-  document.querySelector("#crumb").textContent = labels[ui.page];
+  for (const shortcut of section.querySelectorAll("[data-action]")) {
+    shortcut.hidden = ui.page === "knowledge-archive";
+    shortcut.disabled = work.page !== ui.page || !work.data;
+  }
   const mode = document.querySelector("#mode");
-  const active = ui.snapshot.monitor.enabled;
-  mode.classList.toggle("on", active);
-  mode.innerHTML = `<span class="dot"></span>Авторассылка ${active ? "включена" : "на паузе"}`;
+  if (mode) {
+    const active = ui.snapshot.monitor.enabled;
+    mode.classList.toggle("on", active);
+    mode.innerHTML = `<span class="dot"></span>Авторассылка ${active ? "включена" : "на паузе"}`;
+  }
   document.title = `${labels[ui.page]} · ${panelName}`;
-  content.innerHTML = pages[ui.page]();
+  content.innerHTML = isWorkPage(ui.page) ? workPage() : pages[ui.page]();
 }
 function metric(key, label, count, tone = "") {
   return `<button class="metric ${tone}" type="button" data-action="filter" data-id="${key}" aria-pressed="${ui.filter === key}">
@@ -156,38 +207,36 @@ function isWaiting(point) { return ["waiting", "unknown"].includes(point.today.s
 function pointsPage() {
   const {points, now} = ui.snapshot;
   const overview = ui.page === "overview";
-  const subtitle = overview ? `${icon("calendar")}${dateFormat.format(new Date(now))} · МСК` :
-    "Графики открытия и ответственные за каждую точку";
-  if (!points.length) {
-    return pageHead(overview ? "Открытие точек" : labels.points, subtitle, button("point-new", "Добавить точку", {icon: "plus", kind: "primary"})) +
-      `<section class="card">${empty("store", "Вы ещё не добавили точки", "Подключите iiko и задайте график первой точки.",
-        `<a href="#iiko" class="button">${icon("link")}Настроить iiko</a>`)}</section>`;
-  }
+  const title = overview ? "Открытие смен" : labels.points;
+  const subtitle = overview ? `${icon("calendar")}${dateFormat.format(new Date(now))} · МСК` : "";
+  const add = button("point-new", "Добавить точку", {icon:"plus", kind:"primary"});
+  if (!points.length) return pageHead(title, subtitle, add) +
+    `<section class="card">${empty("store", "Вы ещё не добавили точки", "Подключите iiko и задайте график первой точки.",
+      `<a href="#iiko" class="button">${icon("link")}Настроить iiko</a>`)}</section>`;
   const filters = [["all", "Все статусы"], ["on_time", statusLabels.on_time[0]], ["late", "Все опоздания"],
     ["not_open", statusLabels.not_open[0]], ["late_open", statusLabels.late_open[0]], ["waiting", "Ожидают"],
     ["api_error", statusLabels.api_error[0]], ["day_off", "Выходной"], ["paused", "На паузе"]];
+  const statuses = ["on_time", "late_open", "not_open"];
+  if (points.some(point => point.today.status === "api_error")) statuses.push("api_error");
   const scores = overview ? `<div class="metrics" role="group" aria-label="Фильтры смен">
-    ${metric("all", "Все точки", points.length)}
-    ${["not_open", "late_open", "api_error"].map(status => {
+    ${metric("all", "Все точки", points.length)}${statuses.map(status => {
       const [label, tone] = statusLabels[status];
       return metric(status, label, points.filter(point => point.today.status === status).length, tone);
-    }).join("")}
-  </div>` : "";
+    }).join("")}</div>` : "";
   const latest = points.map(point => point.today.checked_at).filter(Boolean).sort().at(-1);
-  return pageHead(overview ? "Открытие точек" : labels.points, subtitle,
-    button("check-all", "Проверить сейчас", {icon: "refresh"}) + button("point-new", "Добавить точку", {icon: "plus", kind: "primary"})) +
-    scores + `<section class="card">
-    <div class="card-head"><div class="card-headline"><h2>Точки сети</h2><span class="count">${points.length}</span></div>
-      <div class="table-controls">${search("Поиск точки")}${overview ? "" : selectFilter(filters)}</div></div>
-    <div class="table-wrap"><table class="point-table" aria-label="Точки сети"><thead><tr>
-      <th scope="col">Точка</th><th scope="col">По графику</th><th scope="col">Открыта</th><th scope="col">Статус</th>
-      <th scope="col">Ответственные</th><th scope="col"><span class="sr-only">Действия</span></th>
-    </tr></thead><tbody id="table-rows">${pointRows()}</tbody></table></div>
+  const visible = filteredPoints();
+  return pageHead(title, subtitle, button("check-all", "Проверить сейчас", {icon:"refresh"}) + add) + scores +
+    `<div class="record-layout monitor-layout"><section class="card"><div class="card-head"><div class="card-headline"><h2>Точки сети</h2><span class="count">${points.length}</span></div>
+    <div class="table-controls">${search("Поиск точки")}${selectFilter(filters)}</div></div>
+    <div class="table-wrap"><table class="point-table" aria-label="Точки сети"><thead><tr><th scope="col">Точка</th>
+    <th scope="col">По графику</th><th scope="col">Открыта</th><th scope="col">Статус</th></tr></thead>
+    <tbody id="table-rows">${pointRows(visible)}</tbody></table></div>
     <div class="table-foot"><span>${latest ? `Последняя проверка в ${time(latest)} МСК` : "Данные ещё не проверены"}</span>
-      <a href="#history" class="text-button">Журнал писем <span aria-hidden="true">→</span></a></div>
-    </section>`;
+    <a href="#history" class="text-button">Журнал писем →</a></div></section>
+    <div id="point-detail" aria-label="Карточка торговой точки">${pointDetail(visible)}</div></div>`;
 }
-function pointRows() {
+
+function filteredPoints() {
   const people = new Map(ui.snapshot.people.map(person => [person.id, person]));
   const points = ui.snapshot.points.filter(point => {
     const status = point.today.status;
@@ -195,25 +244,37 @@ function pointRows() {
       ui.filter === "waiting" && isWaiting(point);
     return matches && includesQuery(point.name, ...point.people.map(id => people.get(id)?.name));
   });
-  if (ui.page === "overview") {
-    points.sort((left, right) => pointPriority.indexOf(left.today.status) - pointPriority.indexOf(right.today.status));
-  }
+  if (ui.page === "overview") points.sort((a, b) => pointPriority.indexOf(a.today.status) - pointPriority.indexOf(b.today.status));
+  if (!points.some(point => point.id === ui.currentPoint)) ui.currentPoint = points[0]?.id || "";
+  return points;
+}
+
+function pointRows(points) {
   return points.map(point => {
     const state = point.today;
-    const assigned = point.people.map(id => people.get(id)).filter(person => person?.active);
-    return `<tr data-action="point-edit" data-id="${point.id}">
-      <td><button class="point-button" type="button" data-action="point-edit" data-id="${point.id}">
-        <span class="point-icon">${icon("store")}</span>${esc(point.name)}</button></td>
+    const active = point.id === ui.currentPoint;
+    return `<tr data-action="point-select" data-id="${esc(point.id)}" class="${active ? "selected-row" : ""}">
+      <td><button class="point-button" type="button" data-action="point-select" data-id="${esc(point.id)}" aria-pressed="${active}">${esc(point.name)}</button></td>
       <td class="tabular" data-label="По графику">${time(state.deadline)}</td>
-      <td class="tabular ${!state.opened_at ? "muted" : ""}" data-label="Открыта">${time(state.opened_at)}</td>
-      <td data-label="Статус">${badge(...(statusLabels[state.status] || statusLabels.unknown))}
-        ${state.status === "waiting" && state.check_at ? `<span class="status-time">Проверка с ${time(state.check_at)}</span>` : ""}</td>
-      <td class="people-cell" data-label="Ответственные">${assigned.length ? esc(assigned.map(person => person.name).join(", ")) : "Не назначены"}</td>
-      <td><div class="table-end">${iconButton("point-mail", "Предпросмотр письма", "mail", point.id)}
-        ${iconButton("point-edit", "Редактировать точку", "right", point.id)}</div></td>
-    </tr>`;
-  }).join("") || `<tr><td colspan="6" class="empty-cell">${empty("search", "Точки не найдены", "Измените поиск или фильтр.")}</td></tr>`;
+      <td class="tabular" data-label="Открыта">${time(state.opened_at)}</td>
+      <td data-label="Статус">${badge(...(statusLabels[state.status] || statusLabels.unknown))}</td></tr>`;
+  }).join("") || `<tr><td colspan="4" class="empty-cell">${empty("search", "Точки не найдены", "Измените поиск или фильтр.")}</td></tr>`;
 }
+
+function pointDetail(visible) {
+  const point = visible.find(item => item.id === ui.currentPoint);
+  if (!point) return "";
+  const state = point.today;
+  const assigned = ui.snapshot.people.filter(person => point.people.includes(person.id) && person.active);
+  return `<section class="card record-detail" tabindex="-1"><div class="card-head"><h2>${esc(point.name)}</h2>${listButton()}</div><div class="card-body stack">
+    <div>${badge(...(statusLabels[state.status] || statusLabels.unknown))}</div>
+    <dl class="profile-facts"><div><dt>По графику</dt><dd>${time(state.deadline)}</dd></div><div><dt>Открыта</dt><dd>${time(state.opened_at)}</dd></div>
+    <div><dt>Проверка с</dt><dd>${time(state.check_at)}</dd></div><div><dt>Последняя проверка</dt><dd>${time(state.checked_at)}</dd></div>
+    <div><dt>Ответственные</dt><dd>${assigned.length ? assigned.map(person => esc(person.name)).join(", ") : "Не назначены"}</dd></div></dl>
+    <div class="row">${button("point-edit","График точки",{icon:"pencil",id:point.id})}
+    ${button("point-mail","Предпросмотр письма",{icon:"mail",id:point.id})}</div></div></section>`;
+}
+
 function peoplePage() {
   const list = ui.snapshot.people;
   return pageHead(labels.people, "Адреса для оповещений и их торговые точки",
@@ -282,7 +343,76 @@ function dailyOpeningBar(day, max) {
     <span class="tabular stats-rate">${openingPercent(day.on_time_percent)}</span>${icon("right")}
   </button>`;
 }
-function statisticsResults({totals, days, points, from_date, to_date}) {
+function statisticsValue(row, column) {
+  const value = row[column];
+  if (statisticsTimeColumns.has(column)) {
+    const moment = Date.parse(value);
+    return Number.isFinite(moment) ? moment : null;
+  }
+  if (column === "status") {
+    const rank = pointPriority.indexOf(value);
+    return rank < 0 ? null : rank;
+  }
+  return value;
+}
+function sortedStatisticsRows(group) {
+  const {column, descending, rows, renderRows} = statisticsTables[group];
+  const ordered = [...rows].sort((left, right) => {
+    const a = statisticsValue(left, column);
+    const b = statisticsValue(right, column);
+    const byName = () => statisticsNames.compare(left.name, right.name);
+    if (a == null) return b == null ? byName() : 1;
+    if (b == null) return -1;
+    const difference = typeof a === "number" ? a - b : statisticsNames.compare(a, b);
+    return difference ? difference * (descending ? -1 : 1) : byName();
+  });
+  return renderRows(ordered);
+}
+function statisticsDirectionLabel(descending) {
+  return descending ? "↓ По убыванию" : "↑ По возрастанию";
+}
+function statisticsSortControls(group) {
+  const {columns, column, descending} = statisticsTables[group];
+  const label = group === "points" ? "Сортировка по точкам" : "Сортировка открытий за день";
+  return `<div class="stats-sort"><label>Сортировка<select data-statistics-sort="${group}" aria-label="${label}">
+    ${columns.map(([key, title]) => `<option value="${key}" ${selected(key === column)}>${title}</option>`).join("")}</select></label>
+    <button class="button" type="button" data-action="statistics-direction" data-id="${group}" title="Изменить порядок">
+      ${statisticsDirectionLabel(descending)}</button></div>`;
+}
+function statisticsHead(group, key, title) {
+  const {column, descending} = statisticsTables[group];
+  const order = column === key ? ` aria-sort="${descending ? "descending" : "ascending"}"` : "";
+  return `<th scope="col" data-statistics-column="${key}"${order}>${title}</th>`;
+}
+function updateStatisticsSort(group) {
+  const scope = group === "day" ? drawer : content;
+  const table = scope.querySelector(`table[data-statistics-table="${group}"]`);
+  if (!table) return;
+  const {column, descending} = statisticsTables[group];
+  table.tBodies[0].innerHTML = sortedStatisticsRows(group);
+  for (const heading of table.tHead.rows[0].cells) {
+    if (heading.dataset.statisticsColumn === column) heading.setAttribute("aria-sort", descending ? "descending" : "ascending");
+    else heading.removeAttribute("aria-sort");
+  }
+  scope.querySelector(`[data-action="statistics-direction"][data-id="${group}"]`).textContent =
+    statisticsDirectionLabel(descending);
+}
+function statisticsPointRows(points) {
+  return points.map(row => `<tr>
+    <td><button class="point-button stats-point" type="button" data-action="statistics-point" data-id="${esc(row.id)}">${esc(row.name)}</button></td>
+    ${openingOutcomes.map(([key, title]) => `<td class="tabular" data-label="${title}">${row[key]}</td>`).join("")}
+    <td class="tabular" data-label="Доля вовремя">${openingPercent(row.on_time_percent)}</td>
+    <td class="tabular" data-label="Среднее опоздание">${openingDelay(row.average_delay_seconds)}</td></tr>`).join("");
+}
+function statisticsDayRows(points) {
+  return points.map(row => `<tr><td>${esc(row.name)}</td>
+    <td class="tabular" data-label="По графику">${time(row.deadline, statisticsTimeFormat)}</td>
+    <td class="tabular" data-label="Факт">${time(row.opened_at, statisticsTimeFormat)}</td>
+    <td>${badge(...(statusLabels[row.status] || statusLabels.unknown))}
+      ${row.delay_seconds === null ? "" : `<small class="muted stats-delay">+${openingDelay(row.delay_seconds)}</small>`}
+      ${row.checked_at ? `<small class="muted stats-delay">Проверено в ${time(row.checked_at, statisticsTimeFormat)}</small>` : ""}</td></tr>`).join("");
+}
+function statisticsResults({totals, days, from_date, to_date}) {
   if (!totals.confirmed && !totals.api_error) {
     return `<section class="card">${empty("chart", "За этот период пока нет результатов", "Статистика появится после проверки открытия в iiko.")}</section>`;
   }
@@ -302,16 +432,10 @@ function statisticsResults({totals, days, points, from_date, to_date}) {
       <div class="stats-days" aria-label="Результаты по дням">${[...days].reverse().map(day => dailyOpeningBar(day, max)).join("")}</div>
     </section>
     <section class="card">
-      <div class="card-head"><h2>По точкам</h2></div>
-      <div class="table-wrap"><table class="point-table stats-table" aria-label="Статистика открытий по точкам"><thead><tr>
-        <th scope="col">Точка</th>${openingOutcomes.map(([, title]) => `<th scope="col">${title}</th>`).join("")}
-        <th scope="col">Доля вовремя</th><th scope="col">Среднее опоздание</th>
-      </tr></thead><tbody>${points.map(row => `<tr>
-        <td><button class="point-button stats-point" type="button" data-action="statistics-point" data-id="${esc(row.id)}">${esc(row.name)}</button></td>
-        ${openingOutcomes.map(([key, title]) => `<td class="tabular" data-label="${title}">${row[key]}</td>`).join("")}
-        <td class="tabular" data-label="Доля вовремя">${openingPercent(row.on_time_percent)}</td>
-        <td class="tabular" data-label="Среднее опоздание">${openingDelay(row.average_delay_seconds)}</td>
-      </tr>`).join("")}</tbody></table></div>
+      <div class="card-head"><h2>По точкам</h2>${statisticsSortControls("points")}</div>
+      <div class="table-wrap"><table class="point-table stats-table" data-statistics-table="points" aria-label="Статистика открытий по точкам"><thead><tr>
+        ${statisticsTables.points.columns.map(([key, title]) => statisticsHead("points", key, title)).join("")}
+      </tr></thead><tbody>${sortedStatisticsRows("points")}</tbody></table></div>
       <div class="table-foot"><span>Один результат на точку за день</span><span>«Без открытия» на момент последней проверки</span></div>
     </section>`;
 }
@@ -325,6 +449,7 @@ async function loadStatistics() {
   try {
     const report = await api(`/statistics?${params}`);
     if (!current()) return;
+    statisticsTables.points.rows = report.points;
     results.innerHTML = statisticsResults(report);
     results.querySelectorAll("[data-stats-amount]").forEach(segment => {
       segment.style.flexGrow = segment.dataset.statsAmount;
@@ -337,15 +462,15 @@ async function loadStatistics() {
 }
 async function openStatisticsDay(day) {
   const {point} = ui.statistics;
+  const request = ++statisticsDayRequest;
   const report = await api(`/statistics/day/${encodeURIComponent(day)}?${new URLSearchParams({point})}`);
-  if (ui.page !== "statistics" || ui.statistics.point !== point) return;
-  drawerView("Открытия за день", `${reportDate(report.day)} · МСК`, `<div class="table-wrap"><table class="point-table stats-day-table" aria-label="Открытия точек за день">
-      <thead><tr><th scope="col">Точка</th><th scope="col">По графику</th><th scope="col">Факт</th><th scope="col">Статус</th></tr></thead>
-      <tbody>${report.points.map(row => `<tr><td>${esc(row.name)}</td><td class="tabular" data-label="По графику">${time(row.deadline, statisticsTimeFormat)}</td>
-        <td class="tabular" data-label="Факт">${time(row.opened_at, statisticsTimeFormat)}</td><td>${badge(...(statusLabels[row.status] || statusLabels.unknown))}
-          ${row.delay_seconds === null ? "" : `<small class="muted stats-delay">+${openingDelay(row.delay_seconds)}</small>`}
-          ${row.checked_at ? `<small class="muted stats-delay">Проверено в ${time(row.checked_at, statisticsTimeFormat)}</small>` : ""}</td></tr>`).join("")}</tbody>
-    </table></div>`);
+  if (ui.page !== "statistics" || ui.statistics.point !== point || request !== statisticsDayRequest) return;
+  statisticsTables.day.rows = report.points;
+  drawerView("Открытия за день", `${reportDate(report.day)} · МСК`, `${statisticsSortControls("day")}
+    <div class="table-wrap"><table class="point-table stats-day-table" data-statistics-table="day" aria-label="Открытия точек за день">
+      <thead><tr>${statisticsHead("day", "name", "Точка")}${statisticsHead("day", "deadline", "По графику")}
+        ${statisticsHead("day", "opened_at", "Факт")}${statisticsHead("day", "status", "Статус")}</tr></thead>
+      <tbody>${sortedStatisticsRows("day")}</tbody></table></div>`);
 }
 function historyPage() {
   return pageHead(labels.history, "Автоматические оповещения, ручные отправки и тесты SMTP",
@@ -387,9 +512,22 @@ function healthBadge(configured, health) {
 }
 function mailPage() {
   const {smtp, smtp_health: health, imap} = ui.snapshot;
-  return pageHead(labels.smtp, "Отправка оповещений и проверка входящих") +
-    `<div class="settings-grid">
-      <section class="card"><div class="card-head"><h2>SMTP · Отправитель</h2>${healthBadge(smtp.host, health)}</div>
+  const channel = ui.page === "imap" ? imapCard(imap) : smtpCard(smtp, health);
+  return pageHead(labels[ui.page], "") + `<div class="settings-grid">${channel}
+    <section class="card"><div class="card-head"><h2>Тестовое письмо</h2><span class="point-icon">${icon("send")}</span></div>
+          <form class="card-body stack" data-form="smtp-test">
+            <div class="error-box" data-error role="alert"></div>
+            <label>Email получателя<input name="email" type="email" required placeholder="manager@example.org" value="${esc(imap.email)}">
+              ${imap.email ? '<span class="hint">Проверка через IMAP доступна для адреса подключённого ящика.</span>' : ""}</label>
+            <div class="row"><button class="button" ${disabled(!smtp.host)}>${icon("send")}Отправить тест</button></div>
+            <div id="test-result" aria-live="polite"></div>
+            <a class="text-button" href="#history">Открыть журнал писем →</a>
+          </form>
+        </section>
+    </div>`;
+}
+function smtpCard(smtp, health) {
+  return `<section class="card"><div class="card-head"><h2>SMTP · Отправитель</h2>${healthBadge(smtp.host, health)}</div>
         <form id="smtp-form" class="card-body stack" data-form="smtp">
           <div class="error-box" data-error role="alert"></div>
           <div class="field-grid smtp-grid">
@@ -410,21 +548,7 @@ function mailPage() {
             ${button("smtp-probe", "Проверить соединение", {icon: "refresh", disabled: !smtp.host})}</div>
           ${health ? `<div class="${health.ok ? "result-box" : "error-box"}" role="status">${esc(health.message)}</div>` : ""}
         </form>
-      </section>
-      <div class="stack">
-        ${imapCard(imap)}
-        <section class="card"><div class="card-head"><h2>Тестовое письмо</h2><span class="point-icon">${icon("send")}</span></div>
-          <form class="card-body stack" data-form="smtp-test">
-            <div class="error-box" data-error role="alert"></div>
-            <label>Email получателя<input name="email" type="email" required placeholder="manager@example.org" value="${esc(imap.email)}">
-              ${imap.email ? '<span class="hint">Проверка через IMAP доступна для адреса подключённого ящика.</span>' : ""}</label>
-            <div class="row"><button class="button" ${disabled(!smtp.host)}>${icon("send")}Отправить тест</button></div>
-            <div id="test-result" aria-live="polite"></div>
-            <a class="text-button" href="#history">Открыть журнал писем →</a>
-          </form>
-        </section>
-      </div>
-    </div>`;
+      </section>`;
 }
 function imapCard(imap) {
   return `<section class="card"><div class="card-head"><h2>IMAP · Входящие</h2>${healthBadge(imap.host, imap.health)}</div>
@@ -471,7 +595,8 @@ function monitorPage() {
 }
 
 function drawerView(title, hint, body, options = {}) {
-  const {form = "", id, submit, extra = ""} = options;
+  const {form = "", id, submit, extra = "", wide = false} = options;
+  drawer.classList.toggle("document-drawer", wide);
   drawer.innerHTML = `<form class="drawer-form" data-form="${form}" data-id="${esc(id)}">
     <header class="drawer-head"><div><h2 id="drawer-title">${esc(title)}</h2>${hint ? `<p>${esc(hint)}</p>` : ""}</div>
       ${iconButton("drawer-close", "Закрыть", "close", "")}</header>
@@ -666,6 +791,7 @@ async function trackTest(id, container) {
   if (container.isConnected) container.innerHTML = '<p class="notice">Письмо в очереди. Статус доступен в журнале.</p>';
 }
 async function handleForm(form) {
+  if (form.dataset.form.startsWith("work-")) return submitWork(form);
   const values = new FormData(form);
   const id = form.dataset.id;
   switch (form.dataset.form) {
@@ -736,7 +862,15 @@ async function remove(action, id) {
   toast("Запись удалена.");
 }
 const actions = {
+  ...workActions,
+  "point-select": id => { ui.currentPoint = id; updateRows(); focusRecord(); },
+  "list-return": returnToRecords,
   "statistics-day": openStatisticsDay,
+  "statistics-direction": group => {
+    const sort = statisticsTables[group];
+    sort.descending = !sort.descending;
+    updateStatisticsSort(group);
+  },
   "statistics-point": async id => {
     ui.statistics.point = id;
     const filter = document.querySelector("#statistics-point");
@@ -864,7 +998,11 @@ function updateRows() {
   if (!rows) return;
   if (ui.page === "history") rows.innerHTML = historyRows();
   else if (ui.page === "people") rows.innerHTML = peopleRows();
-  else rows.innerHTML = pointRows();
+  else {
+    const visible = filteredPoints();
+    rows.innerHTML = pointRows(visible);
+    document.querySelector("#point-detail").innerHTML = pointDetail(visible);
+  }
 }
 document.addEventListener("input", event => {
   if (event.target.id === "table-search") {
@@ -874,7 +1012,13 @@ document.addEventListener("input", event => {
 });
 document.addEventListener("change", event => {
   const node = event.target;
-  if (node.id === "statistics-period" || node.id === "statistics-point") {
+  if (node.hasAttribute("data-statistics-sort")) {
+    const group = node.dataset.statisticsSort;
+    const sort = statisticsTables[group];
+    sort.column = node.value;
+    sort.descending = !["name", "status"].includes(node.value) && !statisticsTimeColumns.has(node.value);
+    updateStatisticsSort(group);
+  } else if (node.id === "statistics-period" || node.id === "statistics-point") {
     ui.statistics[node.id === "statistics-period" ? "days" : "point"] = node.value;
     loadStatistics();
   } else if (node.id === "table-filter") {
@@ -896,8 +1040,22 @@ document.addEventListener("change", event => {
   }
 });
 document.querySelector("#mobile-nav").addEventListener("click", event => {
-  const isOpen = document.querySelector("#sidebar").classList.toggle("open");
+  const isOpen = document.querySelector("#module-menu").classList.toggle("open");
   event.currentTarget.setAttribute("aria-expanded", String(isOpen));
+});
+document.querySelector("#module-menu").addEventListener("click", closeModuleMenu);
+document.querySelector(".skip-link").addEventListener("click", event => {
+  event.preventDefault();
+  content.focus();
+});
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape" && document.querySelector("#module-menu").classList.contains("open")) {
+    closeModuleMenu();
+    document.querySelector("#mobile-nav").focus();
+  }
+});
+document.addEventListener("click", event => {
+  if (!event.target.closest(".app-header")) closeModuleMenu();
 });
 drawer.addEventListener("cancel", event => {
   if (drawer.querySelector(".drawer-form")?.dataset.busy) event.preventDefault();
