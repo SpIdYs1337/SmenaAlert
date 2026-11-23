@@ -319,8 +319,8 @@ function assetCard(item) {
     ? `<a href="#admin/${esc(last.employee)}">${esc(item.employee_name)}</a>` : esc(item.employee_name || "—");
   const dateStarted = item.service_started_on ? esc(reportDate(item.service_started_on)) : "—";
   const photoURL = `/api/work/inventory/${esc(item.id)}/photo`;
-  const photo = item.has_photo ? `<a class="asset-photo" href="${photoURL}" target="_blank" rel="noopener">
-    <img src="${photoURL}" alt="Фото · ${esc(item.name)}"></a>` : "";
+  const photo = item.has_photo ? `<button type="button" class="asset-photo" data-action="work-view-photo" aria-haspopup="dialog">
+    <img src="${photoURL}" alt=""><span>${icon("search")}Увеличить фото</span></button>` : "";
   const relocate = writer ? button("work-move", "Переместить", {id:`${item.id}/relocate`}) : "";
   const photoButton = writer ? button("work-photo", item.has_photo ? "Заменить фото" : "Добавить фото", {icon:"image"}) : "";
   const termButton = writer && item.service_started_on ?
@@ -392,6 +392,48 @@ function photoForm() {
     <p class="hint">JPG, PNG или WebP до 5 МБ.</p>
     ${item.has_photo ? '<label class="check"><input type="checkbox" name="remove">Удалить текущее фото</label>' : ""}
     `, {form:"work-photo", id:item.id, submit:"Сохранить"});
+}
+
+const assetPhotoViewer = document.querySelector("#asset-photo-viewer");
+assetPhotoViewer.addEventListener("click", event => {
+  if (event.target === assetPhotoViewer) assetPhotoViewer.close();
+});
+window.addEventListener("hashchange", () => assetPhotoViewer.close());
+
+function viewAssetPhoto(_, opener) {
+  const name = esc(work.asset.name);
+  assetPhotoViewer.innerHTML = `<header class="asset-photo-head row">
+    <h2 id="asset-photo-title">${name}</h2><div class="row">
+    <button type="button" class="button" data-photo-zoom disabled>Увеличить ×2</button>
+    <form method="dialog"><button class="icon-button" type="submit" aria-label="Закрыть фото" autofocus>${icon("close")}</button></form>
+    </div></header>
+    <div class="asset-photo-stage" tabindex="0" role="region" aria-label="Просмотр фото">
+      <img alt="Фото · ${name}" hidden><p role="status" class="muted">Загрузка фото…</p>
+    </div>`;
+  const stage = assetPhotoViewer.querySelector(".asset-photo-stage");
+  const image = stage.querySelector("img");
+  const status = stage.querySelector("[role=status]");
+  const zoom = assetPhotoViewer.querySelector("[data-photo-zoom]");
+  image.addEventListener("load", () => {
+    image.hidden = false;
+    status.hidden = true;
+    zoom.disabled = false;
+  });
+  image.addEventListener("error", () => { status.textContent = "Фото не загрузилось."; });
+  zoom.addEventListener("click", () => {
+    const zooming = !stage.classList.contains("zoomed");
+    image.style.width = zooming ? `${image.getBoundingClientRect().width * 2}px` : "";
+    stage.classList.toggle("zoomed", zooming);
+    zoom.textContent = zooming ? "Вписать в окно" : "Увеличить ×2";
+    stage.scrollTo((stage.scrollWidth - stage.clientWidth) / 2, (stage.scrollHeight - stage.clientHeight) / 2);
+  });
+  assetPhotoViewer.addEventListener("close", () => {
+    if (assetPhotoViewer.open) return;
+    assetPhotoViewer.replaceChildren();
+    opener.focus({preventScroll: true});
+  }, {once:true});
+  assetPhotoViewer.showModal();
+  image.src = opener.querySelector("img").src;
 }
 
 function employeePage() {
@@ -546,6 +588,7 @@ const workActions = {
   "work-move": movementForm,
   "work-service": serviceForm,
   "work-photo": photoForm,
+  "work-view-photo": viewAssetPhoto,
   "work-employee": employeeForm,
 };
 
