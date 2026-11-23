@@ -27,6 +27,7 @@ const pointPriority = ["not_open", "api_error", "late_open", "waiting", "unknown
 const days = {mon: "Понедельник", tue: "Вторник", wed: "Среда", thu: "Четверг", fri: "Пятница", sat: "Суббота", sun: "Воскресенье"};
 const ui = {page: "overview", snapshot: null, query: "", filter: "all", currentPoint: "", statistics: {days: "7", point: ""}};
 let statisticsRequest = 0;
+let statisticsDayRequest = 0;
 const timeFormat = new Intl.DateTimeFormat("ru-RU", {timeZone: "Europe/Moscow", hour: "2-digit", minute: "2-digit"});
 const dateFormat = new Intl.DateTimeFormat("ru-RU", {timeZone: "Europe/Moscow", day: "numeric", month: "long", year: "numeric"});
 const dateTimeFormat = new Intl.DateTimeFormat("ru-RU", {
@@ -39,6 +40,20 @@ const openingOutcomes = [
   ["on_time", "Вовремя", "green"], ["late_open", "С опозданием", "amber"],
   ["not_open", "Без открытия", "red"], ["api_error", "Ошибка iiko", "blue"],
 ];
+const statisticsNames = new Intl.Collator("ru-RU", {numeric: true, sensitivity: "base"});
+const statisticsTimeColumns = new Set(["deadline", "opened_at", "checked_at"]);
+const statisticsTables = {
+  points: {
+    columns: [["name", "Точка"], ...openingOutcomes.map(([key, title]) => [key, title]),
+      ["on_time_percent", "Доля вовремя"], ["average_delay_seconds", "Среднее опоздание"]],
+    column: "name", descending: false, rows: [], renderRows: statisticsPointRows,
+  },
+  day: {
+    columns: [["name", "Точка"], ["deadline", "По графику"], ["opened_at", "Фактическое открытие"],
+      ["status", "Статус"], ["delay_seconds", "Опоздание"], ["checked_at", "Время проверки"]],
+    column: "name", descending: false, rows: [], renderRows: statisticsDayRows,
+  },
+};
 
 function esc(value) {
   const chars = {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"};
@@ -328,7 +343,76 @@ function dailyOpeningBar(day, max) {
     <span class="tabular stats-rate">${openingPercent(day.on_time_percent)}</span>${icon("right")}
   </button>`;
 }
-function statisticsResults({totals, days, points, from_date, to_date}) {
+function statisticsValue(row, column) {
+  const value = row[column];
+  if (statisticsTimeColumns.has(column)) {
+    const moment = Date.parse(value);
+    return Number.isFinite(moment) ? moment : null;
+  }
+  if (column === "status") {
+    const rank = pointPriority.indexOf(value);
+    return rank < 0 ? null : rank;
+  }
+  return value;
+}
+function sortedStatisticsRows(group) {
+  const {column, descending, rows, renderRows} = statisticsTables[group];
+  const ordered = [...rows].sort((left, right) => {
+    const a = statisticsValue(left, column);
+    const b = statisticsValue(right, column);
+    const byName = () => statisticsNames.compare(left.name, right.name);
+    if (a == null) return b == null ? byName() : 1;
+    if (b == null) return -1;
+    const difference = typeof a === "number" ? a - b : statisticsNames.compare(a, b);
+    return difference ? difference * (descending ? -1 : 1) : byName();
+  });
+  return renderRows(ordered);
+}
+function statisticsDirectionLabel(descending) {
+  return descending ? "↓ По убыванию" : "↑ По возрастанию";
+}
+function statisticsSortControls(group) {
+  const {columns, column, descending} = statisticsTables[group];
+  const label = group === "points" ? "Сортировка по точкам" : "Сортировка открытий за день";
+  return `<div class="stats-sort"><label>Сортировка<select data-statistics-sort="${group}" aria-label="${label}">
+    ${columns.map(([key, title]) => `<option value="${key}" ${selected(key === column)}>${title}</option>`).join("")}</select></label>
+    <button class="button" type="button" data-action="statistics-direction" data-id="${group}" title="Изменить порядок">
+      ${statisticsDirectionLabel(descending)}</button></div>`;
+}
+function statisticsHead(group, key, title) {
+  const {column, descending} = statisticsTables[group];
+  const order = column === key ? ` aria-sort="${descending ? "descending" : "ascending"}"` : "";
+  return `<th scope="col" data-statistics-column="${key}"${order}>${title}</th>`;
+}
+function updateStatisticsSort(group) {
+  const scope = group === "day" ? drawer : content;
+  const table = scope.querySelector(`table[data-statistics-table="${group}"]`);
+  if (!table) return;
+  const {column, descending} = statisticsTables[group];
+  table.tBodies[0].innerHTML = sortedStatisticsRows(group);
+  for (const heading of table.tHead.rows[0].cells) {
+    if (heading.dataset.statisticsColumn === column) heading.setAttribute("aria-sort", descending ? "descending" : "ascending");
+    else heading.removeAttribute("aria-sort");
+  }
+  scope.querySelector(`[data-action="statistics-direction"][data-id="${group}"]`).textContent =
+    statisticsDirectionLabel(descending);
+}
+function statisticsPointRows(points) {
+  return points.map(row => `<tr>
+    <td><button class="point-button stats-point" type="button" data-action="statistics-point" data-id="${esc(row.id)}">${esc(row.name)}</button></td>
+    ${openingOutcomes.map(([key, title]) => `<td class="tabular" data-label="${title}">${row[key]}</td>`).join("")}
+    <td class="tabular" data-label="Доля вовремя">${openingPercent(row.on_time_percent)}</td>
+    <td class="tabular" data-label="Среднее опоздание">${openingDelay(row.average_delay_seconds)}</td></tr>`).join("");
+}
+function statisticsDayRows(points) {
+  return points.map(row => `<tr><td>${esc(row.name)}</td>
+    <td class="tabular" data-label="По графику">${time(row.deadline, statisticsTimeFormat)}</td>
+    <td class="tabular" data-label="Факт">${time(row.opened_at, statisticsTimeFormat)}</td>
+    <td>${badge(...(statusLabels[row.status] || statusLabels.unknown))}
+      ${row.delay_seconds === null ? "" : `<small class="muted stats-delay">+${openingDelay(row.delay_seconds)}</small>`}
+      ${row.checked_at ? `<small class="muted stats-delay">Проверено в ${time(row.checked_at, statisticsTimeFormat)}</small>` : ""}</td></tr>`).join("");
+}
+function statisticsResults({totals, days, from_date, to_date}) {
   if (!totals.confirmed && !totals.api_error) {
     return `<section class="card">${empty("chart", "За этот период пока нет результатов", "Статистика появится после проверки открытия в iiko.")}</section>`;
   }
@@ -348,16 +432,10 @@ function statisticsResults({totals, days, points, from_date, to_date}) {
       <div class="stats-days" aria-label="Результаты по дням">${[...days].reverse().map(day => dailyOpeningBar(day, max)).join("")}</div>
     </section>
     <section class="card">
-      <div class="card-head"><h2>По точкам</h2></div>
-      <div class="table-wrap"><table class="point-table stats-table" aria-label="Статистика открытий по точкам"><thead><tr>
-        <th scope="col">Точка</th>${openingOutcomes.map(([, title]) => `<th scope="col">${title}</th>`).join("")}
-        <th scope="col">Доля вовремя</th><th scope="col">Среднее опоздание</th>
-      </tr></thead><tbody>${points.map(row => `<tr>
-        <td><button class="point-button stats-point" type="button" data-action="statistics-point" data-id="${esc(row.id)}">${esc(row.name)}</button></td>
-        ${openingOutcomes.map(([key, title]) => `<td class="tabular" data-label="${title}">${row[key]}</td>`).join("")}
-        <td class="tabular" data-label="Доля вовремя">${openingPercent(row.on_time_percent)}</td>
-        <td class="tabular" data-label="Среднее опоздание">${openingDelay(row.average_delay_seconds)}</td>
-      </tr>`).join("")}</tbody></table></div>
+      <div class="card-head"><h2>По точкам</h2>${statisticsSortControls("points")}</div>
+      <div class="table-wrap"><table class="point-table stats-table" data-statistics-table="points" aria-label="Статистика открытий по точкам"><thead><tr>
+        ${statisticsTables.points.columns.map(([key, title]) => statisticsHead("points", key, title)).join("")}
+      </tr></thead><tbody>${sortedStatisticsRows("points")}</tbody></table></div>
       <div class="table-foot"><span>Один результат на точку за день</span><span>«Без открытия» на момент последней проверки</span></div>
     </section>`;
 }
@@ -371,6 +449,7 @@ async function loadStatistics() {
   try {
     const report = await api(`/statistics?${params}`);
     if (!current()) return;
+    statisticsTables.points.rows = report.points;
     results.innerHTML = statisticsResults(report);
     results.querySelectorAll("[data-stats-amount]").forEach(segment => {
       segment.style.flexGrow = segment.dataset.statsAmount;
@@ -383,15 +462,15 @@ async function loadStatistics() {
 }
 async function openStatisticsDay(day) {
   const {point} = ui.statistics;
+  const request = ++statisticsDayRequest;
   const report = await api(`/statistics/day/${encodeURIComponent(day)}?${new URLSearchParams({point})}`);
-  if (ui.page !== "statistics" || ui.statistics.point !== point) return;
-  drawerView("Открытия за день", `${reportDate(report.day)} · МСК`, `<div class="table-wrap"><table class="point-table stats-day-table" aria-label="Открытия точек за день">
-      <thead><tr><th scope="col">Точка</th><th scope="col">По графику</th><th scope="col">Факт</th><th scope="col">Статус</th></tr></thead>
-      <tbody>${report.points.map(row => `<tr><td>${esc(row.name)}</td><td class="tabular" data-label="По графику">${time(row.deadline, statisticsTimeFormat)}</td>
-        <td class="tabular" data-label="Факт">${time(row.opened_at, statisticsTimeFormat)}</td><td>${badge(...(statusLabels[row.status] || statusLabels.unknown))}
-          ${row.delay_seconds === null ? "" : `<small class="muted stats-delay">+${openingDelay(row.delay_seconds)}</small>`}
-          ${row.checked_at ? `<small class="muted stats-delay">Проверено в ${time(row.checked_at, statisticsTimeFormat)}</small>` : ""}</td></tr>`).join("")}</tbody>
-    </table></div>`);
+  if (ui.page !== "statistics" || ui.statistics.point !== point || request !== statisticsDayRequest) return;
+  statisticsTables.day.rows = report.points;
+  drawerView("Открытия за день", `${reportDate(report.day)} · МСК`, `${statisticsSortControls("day")}
+    <div class="table-wrap"><table class="point-table stats-day-table" data-statistics-table="day" aria-label="Открытия точек за день">
+      <thead><tr>${statisticsHead("day", "name", "Точка")}${statisticsHead("day", "deadline", "По графику")}
+        ${statisticsHead("day", "opened_at", "Факт")}${statisticsHead("day", "status", "Статус")}</tr></thead>
+      <tbody>${sortedStatisticsRows("day")}</tbody></table></div>`);
 }
 function historyPage() {
   return pageHead(labels.history, "Автоматические оповещения, ручные отправки и тесты SMTP",
@@ -787,6 +866,11 @@ const actions = {
   "point-select": id => { ui.currentPoint = id; updateRows(); focusRecord(); },
   "list-return": returnToRecords,
   "statistics-day": openStatisticsDay,
+  "statistics-direction": group => {
+    const sort = statisticsTables[group];
+    sort.descending = !sort.descending;
+    updateStatisticsSort(group);
+  },
   "statistics-point": async id => {
     ui.statistics.point = id;
     const filter = document.querySelector("#statistics-point");
@@ -928,7 +1012,13 @@ document.addEventListener("input", event => {
 });
 document.addEventListener("change", event => {
   const node = event.target;
-  if (node.id === "statistics-period" || node.id === "statistics-point") {
+  if (node.hasAttribute("data-statistics-sort")) {
+    const group = node.dataset.statisticsSort;
+    const sort = statisticsTables[group];
+    sort.column = node.value;
+    sort.descending = !["name", "status"].includes(node.value) && !statisticsTimeColumns.has(node.value);
+    updateStatisticsSort(group);
+  } else if (node.id === "statistics-period" || node.id === "statistics-point") {
     ui.statistics[node.id === "statistics-period" ? "days" : "point"] = node.value;
     loadStatistics();
   } else if (node.id === "table-filter") {
