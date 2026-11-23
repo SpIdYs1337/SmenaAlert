@@ -9,6 +9,7 @@ import unittest
 import zipfile
 from datetime import datetime
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 try:
     import flask
@@ -505,6 +506,79 @@ class WorkspaceTests(unittest.TestCase):
         item = self.send_files("knowledge", {**fields, "media:" + media: (io.BytesIO(raw), "guide.mp4")})["id"]
         response = self.owner.get(f"/api/work/knowledge/{item}/media/{media}", headers={"Range":"bytes=16-47"})
         self.assertEqual((response.status_code, response.mimetype, response.data), (206, "video/mp4", raw[16:48]))
+
+    def test_handover_acts_fill_parties_and_keep_the_saved_file(self):
+        first = self.write("employees", {"name": "Сотрудник А"})["id"]
+        second = self.write("employees", {"name": "Сотрудник Б"})["id"]
+        day = "2026-11-20"
+        device = self.write("inventory", {"tag": "ACT-01", "name": "Ноутбук & док-станция", "serial": "SN-77",
+                                          "day": day, "act_from": "Передающий со склада"})["id"]
+        path = "/api/work/inventory/" + device
+
+        def act(event, *, client=None):
+            response = (client or self.owner).get(f"{path}/events/{event}/act")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.mimetype, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+            self.assertIn("attachment", response.headers["Content-Disposition"])
+            with zipfile.ZipFile(io.BytesIO(response.data)) as doc:
+                root = ET.fromstring(doc.read("word/document.xml"))
+            return response.data, " ".join(node.text or "" for node in root.iter()
+                                           if node.tag.endswith("}t"))
+
+        def movement(action, **details):
+            current = self.owner.get(path).json["version"]
+            return self.write(f"inventory/{device}/events", {"version": current, "action": action,
+                                                             "day": day, **details})["event"]
+
+        receipt = self.owner.get(path).json["version"]
+        _, initial = act(receipt)
+        self.assertIn("Передающий со склада", initial)
+        self.assertIn("Принял admin", initial)
+        issue = movement("assign", employee=first, service_months=36, act_number="ИТ-07/26",
+                         act_contents="Адаптер питания", act_condition="Исправно")
+        saved, issue_text = act(issue)
+        for field in ("ИТ-07/26", "«20» ноября 2026 г.", "Ноутбук & док-станция", "ACT-01", "SN-77",
+                      "Адаптер питания", "Исправно", "Передал admin", "Принял Сотрудник А"):
+            self.assertIn(field, issue_text)
+        transfer = movement("transfer", employee=second, act_from="Подписант за сотрудника А")
+        _, transfer_text = act(transfer)
+        self.assertIn("Передал Подписант за сотрудника А", transfer_text)
+        self.assertIn("Принял Сотрудник Б", transfer_text)
+        returned = movement("return")
+        _, return_text = act(returned)
+        self.assertIn("Передал Сотрудник Б", return_text)
+        self.assertIn("Принял admin", return_text)
+        relocation = movement("relocate", location="Стеллаж 2")
+        self.assertEqual(self.owner.get(f"{path}/events/{relocation}/act").status_code, 404)
+        self.assertEqual(self.owner.get(f"{path}/events/{2**63}/act").status_code, 404)
+
+        employee = next(row for row in self.owner.get("/api/work/employees").json["items"] if row["id"] == first)
+        self.write("employees/" + first, {**employee, "name": "Сотрудник А после переименования"},
+                   method="PUT", expect=200)
+        self.assertEqual(act(issue)[0], saved)
+        other = self.write("inventory", {"tag":"ACT-02", "name":"Монитор", "day":day})["id"]
+        self.assertEqual(self.owner.get(f"/api/work/inventory/{other}/events/{issue}/act").status_code, 404)
+        self.staff("act-reader", ["inventory.read"])
+        reader, _ = self.activate("act-reader")
+        self.assertEqual(act(issue, client=reader)[0], saved)
+        self.staff("no-acts")
+        restricted, _ = self.activate("no-acts")
+        self.assertEqual(restricted.get(f"{path}/events/{issue}/act").status_code, 403)
+
+    def test_old_handover_can_be_printed_and_bad_act_fields_rollback(self):
+        employee = self.write("employees", {"name":"Первый сотрудник"})["id"]
+        day = "2026-11-20"
+        device = self.write("inventory", {"tag":"LEGACY-ACT", "name":"Монитор", "day":day})["id"]
+        path = "inventory/" + device
+        url = "/api/work/" + path
+        received = self.owner.get(url).json["version"]
+        with self.db.connection() as conn:
+            conn.execute("DELETE FROM asset_acts WHERE event=?", (received,))
+        self.assertEqual(self.owner.get(f"{url}/events/{received}/act").status_code, 200)
+        movement = {"version":received, "action":"assign", "employee":employee, "day":day, "service_months":12}
+        self.write(path + "/events", {**movement, "act_condition":"x" * 401}, expect=400)
+        self.assertEqual(self.owner.get(url).json["version"], received)
+        self.assertIsNone(self.owner.get(url).json["service_months"])
 
     def test_upgrade_keeps_legacy_monitor_volume_and_is_repeatable(self):
         with tempfile.TemporaryDirectory() as directory:

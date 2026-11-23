@@ -407,6 +407,10 @@ summary { cursor: pointer; color: var(--ink); font-weight: 610; }
 .document-drawer { width: min(100%, 850px); }
 .work-file { justify-self: start; overflow-wrap: anywhere; }
 .work-serial, .movement-list small { color: var(--muted); display: block; }
+.act-fields { min-width: 0; }
+.act-fields > .hint { display: block; margin-top: 6px; }
+.act-fields .check { margin-top: 8px; }
+.asset-act-link { display: inline-flex; align-items: center; gap: 6px; justify-self: start; min-height: 34px; text-decoration: underline; text-underline-offset: 3px; }
 .asset-event-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; }
 .asset-event-head time { color: var(--muted); font-variant-numeric: tabular-nums; }
 .asset-event-route { font-weight: 550; overflow-wrap: anywhere; }

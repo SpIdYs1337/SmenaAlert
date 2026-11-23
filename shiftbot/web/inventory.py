@@ -4,6 +4,7 @@ from __future__ import annotations
 from calendar import monthrange
 from datetime import date
 
+from .acts import ACT_OPERATIONS, act_fields, make_act
 from .settings import InputError, identifier, number, text
 
 ACTIONS = {"receive": "Приёмка", "commission": "Ввод в эксплуатацию", "assign": "Выдача сотруднику",
@@ -58,11 +59,28 @@ def event_day(data, now):
 
 
 def record(conn, asset, action, state, employee, employee_name, day, now, actor, note, location):
-    conn.execute("""
+    saved = conn.execute("""
         INSERT INTO asset_events(asset,action,state,employee,employee_name,day,recorded_at,actor,actor_name,note,location)
         VALUES (?,?,?,?,?,?,?,?,?,?,?)
     """, (asset, action, state, employee, employee_name, day, now.isoformat(timespec="seconds"),
           actor["id"], actor["name"], note, location))
+    return saved.lastrowid
+
+
+def act_operation(conn, item, event):
+    return conn.execute("""
+        SELECT e.id,e.day,e.action,e.actor_name,e.employee_name,e.location,a.name,a.tag,a.serial,act.content,
+               (SELECT employee_name FROM asset_events
+                WHERE asset=e.asset AND id<e.id ORDER BY id DESC LIMIT 1) AS previous_holder
+        FROM asset_events e JOIN assets a ON a.id=e.asset
+        LEFT JOIN asset_acts act ON act.event=e.id
+        WHERE e.asset=? AND e.id=?
+    """, (item, event)).fetchone()
+
+
+def store_act(conn, item, event, fields):
+    data = act_operation(conn, item, event)
+    conn.execute("INSERT INTO asset_acts(event,content) VALUES (?,?)", (event, make_act(data, fields)))
 
 
 class Inventory:
@@ -108,11 +126,13 @@ class Inventory:
         location = text(data, "location", "Место приёмки", required=False, limit=160) or "Склад"
         note = text(data, "note", "Основание или комментарий", required=False, limit=500)
         day = event_day(data, now)
+        fields = act_fields(data)
         item = identifier()
         with self.db.connection() as conn:
             conn.execute("INSERT INTO assets(id,tag,tag_key,name,serial) VALUES (?,?,?,?,?)",
                          (item, tag, tag.casefold(), name, serial))
-            record(conn, item, "receive", "stock", None, "", day, now, actor, note, location)
+            event = record(conn, item, "receive", "stock", None, "", day, now, actor, note, location)
+            store_act(conn, item, event, fields)
             if photo is not None:
                 conn.execute("INSERT INTO asset_photos VALUES (?,?)", (item, photo))
         return item
@@ -122,6 +142,7 @@ class Inventory:
         action = text(data, "action", "Операция")
         location = text(data, "location", "Куда перемещается техника", required=action == "relocate", limit=160)
         writing_off = action == "write_off"
+        fields = act_fields(data) if action in ACT_OPERATIONS else None
         label = "Причина списания" if writing_off else "Основание или комментарий"
         note = text(data, "note", label, required=writing_off, limit=500)
         day = event_day(data, now)
@@ -135,14 +156,12 @@ class Inventory:
             if day < last["day"]:
                 raise InputError("Дата должна быть не раньше предыдущей операции.")
             if writing_off:
-                record(conn, item, action, "written_off", None, "", day, now, actor, note, last["location"])
-                return
+                return record(conn, item, action, "written_off", None, "", day, now, actor, note, last["location"])
             if action == "relocate":
                 if location.casefold() == last["location"].casefold():
                     raise InputError("Укажите новое место устройства.")
-                record(conn, item, action, last["state"], last["employee"], last["employee_name"],
-                       day, now, actor, note, location)
-                return
+                return record(conn, item, action, last["state"], last["employee"], last["employee_name"],
+                              day, now, actor, note, location)
             if last["state"] == "stock":
                 allowed = {"assign", "commission"}
             elif last["employee"] is None:
@@ -165,7 +184,19 @@ class Inventory:
                 conn.execute("UPDATE assets SET service_months=?, service_revision=service_revision+1 WHERE id=?",
                              (service_months(data), item))
             destination = location or ("Склад" if action == "return" else last["location"])
-            record(conn, item, action, state, employee_id, employee_name, day, now, actor, note, destination)
+            event = record(conn, item, action, state, employee_id, employee_name, day, now, actor, note, destination)
+            if fields is not None:
+                store_act(conn, item, event, fields)
+            return event
+
+    def act(self, item, event):
+        if not 1 <= event <= 2**63 - 1:
+            return None
+        with self.db.connection() as conn:
+            operation = act_operation(conn, item, event)
+        if operation is None or operation["action"] not in ACT_OPERATIONS:
+            return None
+        return operation["content"] or make_act(operation)
 
     def save_term(self, item, data):
         months = service_months(data)

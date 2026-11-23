@@ -263,6 +263,24 @@ function workSearch(label) {
   return `<label class="search">${icon("search")}<input type="search" data-work-search aria-label="${esc(label)}" placeholder="${esc(label)}" value="${esc(ui.query)}"></label>`;
 }
 
+function handoverFields(sender, receiver) {
+  return `<details class="act-fields" open><summary>Акт приёма-передачи</summary>
+    <p class="hint">Дата, устройство и его номера подставятся из этой операции.</p>
+    <div class="field-grid">
+      <label class="full">Номер акта<input name="act_number" maxlength="64" placeholder="Подставится автоматически"></label>
+      <label>Передал (ФИО)<input name="act_from" maxlength="160" value="${esc(sender)}"></label>
+      <label>Принял (ФИО)<input name="act_to" maxlength="160" value="${esc(receiver)}"></label>
+      <label class="full">Комплектация<input name="act_contents" maxlength="400" placeholder="Например, зарядное устройство"></label>
+      <label class="full">Внешнее и техническое состояние<input name="act_condition" maxlength="400"></label>
+    </div>
+    <label class="check"><input type="checkbox" name="download_act" checked>Скачать акт при сохранении</label>
+  </details>`;
+}
+
+function actUrl(asset, event) {
+  return `/api/work/inventory/${encodeURIComponent(asset)}/events/${event}/act`;
+}
+
 function receiveForm() {
   drawerView("Приёмка техники", "", `
     <label>Инвентарный номер<input name="tag" required maxlength="100"></label>
@@ -271,7 +289,8 @@ function receiveForm() {
     <label>Дата приёмки<input type="date" name="day" required value="${work.data.today}" max="${work.data.today}"></label>
     <label>Место приёмки<input name="location" maxlength="160" required value="Склад"></label>
     <label>Фото устройства <small>необязательно</small><input type="file" name="photo" accept="${photoInputTypes}"></label>
-    <label>Заметка или реквизиты документа<input name="note" maxlength="500"></label>`, {form:"work-receive", submit:"Принять на склад"});
+    <label>Заметка или реквизиты документа<input name="note" maxlength="500"></label>
+    ${handoverFields("", document.body.dataset.operator)}`, {form:"work-receive", submit:"Принять на склад"});
 }
 
 function assetCard(item) {
@@ -284,11 +303,13 @@ function assetCard(item) {
     const place = esc(event.location || "Место не указано");
     const origin = esc(previous?.location || "Место не указано");
     const route = previous && previous.location !== event.location ? `${origin} → ${place}` : place;
+    const act = work.data.act_actions.includes(event.action) ?
+      `<a class="asset-act-link" href="${actUrl(item.id, event.id)}" download>${icon("list")}Скачать акт (DOCX)</a>` : "";
     return `<li><div class="asset-event-head"><strong>${esc(actions[event.action])}</strong><time datetime="${event.day}">${esc(reportDate(event.day))}</time></div>
       <span class="asset-event-route">${route}</span>
       ${event.employee_name ? `<span>Ответственный · ${esc(event.employee_name)}</span>` : ""}
       <small>Оформил ${esc(event.actor_name)} · ${esc(workClock.format(new Date(event.recorded_at)))} МСК</small>
-      ${event.note ? `<p>${esc(event.note)}</p>` : ""}</li>`;
+      ${event.note ? `<p>${esc(event.note)}</p>` : ""}${act}</li>`;
   }).join("");
   const moves = last.state === "stock" ? ["assign","commission"] : last.employee ? ["transfer","return"] : ["assign","return"];
   const writer = grants.has("inventory.write") && !archived;
@@ -342,6 +363,10 @@ async function movementForm(key) {
     ${choices.length ? "" : '<p class="notice">Для выдачи нужен действующий сотрудник. Его добавляет администратор.</p>'}` : "";
   const relocating = action === "relocate";
   const destination = relocating ? "" : action === "return" ? "Склад" : last.location || "";
+  const operator = document.body.dataset.operator;
+  const holder = item.employee_name;
+  const act = work.data.act_actions.includes(action) ?
+    handoverFields(action === "assign" ? operator : holder, action === "return" ? operator : "") : "";
   drawerView(work.data.actions[action], `${item.tag} · ${item.name}`, `
     ${hidden}
     ${selectEmployee}${!item.service_started_on && ["assign","commission"].includes(action) ? serviceField() : ""}
@@ -349,7 +374,7 @@ async function movementForm(key) {
     <label>${relocating ? "Куда переместить" : "Место устройства"}<input name="location" maxlength="160"
       value="${esc(destination)}" placeholder="Например, склад или название точки" ${relocating ? "required" : ""}></label>
     ${day}
-    <label>Заметка или реквизиты документа<input name="note" maxlength="500"></label>`, {form:"work-move", id, submit:"Провести операцию"});
+    <label>Заметка или реквизиты документа<input name="note" maxlength="500"></label>${act}`, {form:"work-move", id, submit:"Провести операцию"});
 }
 
 function serviceForm() {
@@ -488,6 +513,16 @@ async function submitWork(form) {
     history.replaceState(null, "", `#${page}`);
   }
   await loadWork(true, Boolean(result));
+  if (result && values.has("download_act") && work.asset?.id === result.id) {
+    const event = result.event || work.asset.events.at(-1).id;
+    const link = document.createElement("a");
+    link.href = actUrl(result.id, event);
+    link.download = "";
+    document.body.append(link);
+    link.click();
+    link.remove();
+    message = "Операция сохранена. Акт доступен в истории устройства.";
+  }
   toast(message);
 }
 
@@ -554,6 +589,10 @@ function applyWorkSearch(input) {
 
 document.addEventListener("change", event => {
   const input = event.target;
+  if (input.name === "employee" && input.form?.elements.act_to) {
+    input.form.elements.act_to.value = input.value ? input.selectedOptions[0].textContent : "";
+    return;
+  }
   if (input.hasAttribute("data-service-filter")) {
     work.serviceFilter = input.value;
     applyWorkSearch(input.closest(".card").querySelector("[data-work-search]"));

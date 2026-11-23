@@ -68,6 +68,12 @@ class Database:
                     if column not in existing:
                         db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
             self._migrate_asset_events(db)
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS asset_acts (
+                    event INTEGER PRIMARY KEY REFERENCES asset_events(id) ON DELETE CASCADE,
+                    content BLOB NOT NULL
+                )
+            """)
 
     @staticmethod
     def _migrate_asset_events(db):

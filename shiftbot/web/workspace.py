@@ -9,6 +9,7 @@ from flask import Blueprint, abort, g, jsonify, request, send_file
 
 from ..config import MSK
 from .access import PERMISSIONS
+from .acts import ACT_MIME, ACT_OPERATIONS
 from .inventory import ACTIONS, SERVICE_WARNING_DAYS, STATES, Inventory
 from .knowledge import DOCUMENT_LIMIT, MAX_MEDIA, MEDIA_ID, Knowledge
 from .media import DOWNLOAD_MIME, article_media, photo_content
@@ -145,7 +146,7 @@ def workspace_api(service, accounts):
         today = now().date()
         items = inventory.assets(today, request.args.get("employee"), archived=request.args.get("archived") == "1")
         return jsonify(items=items, states=STATES, actions=ACTIONS,
-                       today=today.isoformat(), service_warning_days=SERVICE_WARNING_DAYS)
+                       today=today.isoformat(), service_warning_days=SERVICE_WARNING_DAYS, act_actions=ACT_OPERATIONS)
 
     @api.get("/inventory/assignees")
     @requires("inventory.write")
@@ -173,8 +174,17 @@ def workspace_api(service, accounts):
     @api.post("/inventory/<item>/events")
     @requires("inventory.write")
     def move(item):
-        inventory.move(item, request_data(), now(), g.user)
-        return jsonify(id=item), 201
+        event = inventory.move(item, request_data(), now(), g.user)
+        return jsonify(id=item, event=event), 201
+
+    @api.get("/inventory/<item>/events/<int:event>/act")
+    @requires("inventory.read")
+    def download_act(item, event):
+        document = inventory.act(item, event)
+        if not document:
+            abort(404)
+        return send_file(BytesIO(document), mimetype=ACT_MIME, as_attachment=True,
+                         download_name=f"Акт-приёма-передачи-{event}.docx")
 
     @api.put("/inventory/<item>/service")
     @requires("inventory.write")
