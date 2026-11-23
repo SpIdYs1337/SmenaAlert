@@ -205,6 +205,15 @@ function serviceField(months) {
     required value="${esc(months)}" placeholder="Например, 36"></label>`;
 }
 
+function warrantyCell(item) {
+  if (item.warranty_months === null) return "—";
+  if (item.warranty_months === 0) return "Без гарантии";
+  const end = item.warranty_expires_on
+    ? `До ${esc(reportDate(item.warranty_expires_on))}` : "Укажите дату покупки";
+  return `<div class="service-cell"><span>${esc(item.warranty_months)} мес.</span><small class="muted">${end}</small>
+    ${item.warranty_expired ? badge("Гарантия истекла", "red") : ""}</div>`;
+}
+
 function assetFilters() {
   const days = work.data.service_warning_days;
   return `<select data-service-filter aria-label="Фильтр по сроку эксплуатации">
@@ -281,11 +290,19 @@ function actUrl(asset, event) {
   return `/api/work/inventory/${encodeURIComponent(asset)}/events/${event}/act`;
 }
 
+function assetFields(item = {}) {
+  return `<label>Наименование<input name="name" required maxlength="160" value="${esc(item.name)}"></label>
+    <div class="field-grid">
+      <label>Инвентарный номер<input name="tag" required maxlength="100" value="${esc(item.tag)}"></label>
+      <label>Серийный номер<input name="serial" maxlength="120" value="${esc(item.serial)}"></label>
+      <label>Дата покупки<input name="purchased_on" type="date" max="${work.data.today}" value="${esc(item.purchased_on)}"></label>
+      <label>Срок гарантии, мес.<input name="warranty_months" type="number" min="0" max="600" step="1"
+        value="${esc(item.warranty_months)}"><small class="hint">0 — без гарантии</small></label>
+    </div>`;
+}
+
 function receiveForm() {
-  drawerView("Приёмка техники", "", `
-    <label>Инвентарный номер<input name="tag" required maxlength="100"></label>
-    <label>Наименование<input name="name" required maxlength="160"></label>
-    <label>Серийный номер<input name="serial" maxlength="120"></label>
+  drawerView("Приёмка техники", "", `${assetFields()}
     <label>Дата приёмки<input type="date" name="day" required value="${work.data.today}" max="${work.data.today}"></label>
     <label>Место приёмки<input name="location" maxlength="160" required value="Склад"></label>
     <label>Фото устройства <small>необязательно</small><input type="file" name="photo" accept="${photoInputTypes}"></label>
@@ -293,26 +310,37 @@ function receiveForm() {
     ${handoverFields("", document.body.dataset.operator)}`, {form:"work-receive", submit:"Принять на склад"});
 }
 
+function assetEditForm() {
+  const item = work.asset;
+  drawerView("Редактировать карточку", item.name,
+    `<input type="hidden" name="edit_revision" value="${item.edit_revision}">${assetFields(item)}`,
+    {form:"work-edit-asset", id:item.id, submit:"Сохранить"});
+}
+
 function assetCard(item) {
   const last = item.events[0];
   const archived = last.state === "written_off";
   const received = item.events[item.events.length - 1];
   const actions = work.data.actions;
+  const editor = grants.has("inventory.write");
+  const writer = editor && !archived;
   const history = item.events.map((event, index) => {
     const previous = item.events[index + 1];
     const place = esc(event.location || "Место не указано");
     const origin = esc(previous?.location || "Место не указано");
     const route = previous && previous.location !== event.location ? `${origin} → ${place}` : place;
+    const actLabel = event.has_saved_act ? "Скачать исходный акт (DOCX)" : "Скачать акт (DOCX)";
     const act = work.data.act_actions.includes(event.action) ?
-      `<a class="asset-act-link" href="${actUrl(item.id, event.id)}" download>${icon("list")}Скачать акт (DOCX)</a>` : "";
+      `<a class="asset-act-link" href="${actUrl(item.id, event.id)}" download>${icon("list")}${actLabel}</a>` : "";
+    const edit = editor ? button("work-edit-event", "Редактировать", {id:event.id, icon:"pencil", kind:"subtle"}) : "";
     return `<li><div class="asset-event-head"><strong>${esc(actions[event.action])}</strong><time datetime="${event.day}">${esc(reportDate(event.day))}</time></div>
       <span class="asset-event-route">${route}</span>
       ${event.employee_name ? `<span>Ответственный · ${esc(event.employee_name)}</span>` : ""}
       <small>Оформил ${esc(event.actor_name)} · ${esc(workClock.format(new Date(event.recorded_at)))} МСК</small>
-      ${event.note ? `<p>${esc(event.note)}</p>` : ""}${act}</li>`;
+      ${event.edited_at ? `<small class="muted">Исправление · ${esc(event.editor_name)} · ${esc(workClock.format(new Date(event.edited_at)))} МСК</small>` : ""}
+      ${event.note ? `<p>${esc(event.note)}</p>` : ""}${act || edit ? `<div class="row">${edit}${act}</div>` : ""}</li>`;
   }).join("");
   const moves = last.state === "stock" ? ["assign","commission"] : last.employee ? ["transfer","return"] : ["assign","return"];
-  const writer = grants.has("inventory.write") && !archived;
   const controls = writer ? moves.map((action, index) =>
     button("work-move", actions[action], {id:`${item.id}/${action}`, kind:index === 0 ? "primary" : ""})).join("") : "";
   const owner = last.employee && grants.has("admin.manage")
@@ -325,9 +353,13 @@ function assetCard(item) {
   const photoButton = writer ? button("work-photo", item.has_photo ? "Заменить фото" : "Добавить фото", {icon:"image"}) : "";
   const termButton = writer && item.service_started_on ?
     button("work-service", item.service_months ? "Изменить срок" : "Указать срок", {icon:"clock"}) : "";
-  return `<section class="card record-detail" aria-label="Карточка техники" tabindex="-1"><div class="card-head"><h2>${esc(item.name)}</h2>${listButton()}</div>
+  const editCard = editor ? button("work-edit-asset", "Редактировать карточку", {icon:"pencil"}) : "";
+  return `<section class="card record-detail" aria-label="Карточка техники" tabindex="-1"><div class="card-head">
+    <h2>${esc(item.name)}</h2><div class="row">${editCard}${listButton()}</div></div>
     <div class="card-body stack"><div class="row"><strong>${esc(item.tag)}</strong>${assetStatusBadge(last.state, item.service_started_on)}</div>
     ${photo}<dl class="profile-facts"><div><dt>Дата приёмки</dt><dd>${esc(reportDate(received.day))}</dd></div>
+    <div><dt>Дата покупки</dt><dd>${item.purchased_on ? esc(reportDate(item.purchased_on)) : "—"}</dd></div>
+    <div><dt>Срок гарантии</dt><dd>${warrantyCell(item)}</dd></div>
     <div><dt>Серийный номер</dt><dd>${esc(item.serial || "—")}</dd></div><div><dt>Закреплено за</dt><dd>${owner}</dd></div>
     <div><dt>${archived ? "Последнее место" : "Текущее место"}</dt><dd>${esc(last.location || "Место не указано")}</dd></div>
     <div><dt>Начало эксплуатации</dt><dd>${dateStarted}</dd></div>
@@ -340,13 +372,19 @@ function assetCard(item) {
     </div></section>`;
 }
 
+function assigneeField(choices, employee = "") {
+  return `<label>Сотрудник<select name="employee" aria-label="Сотрудник" required><option value="">Выберите сотрудника</option>
+    ${choices.map(person => `<option value="${esc(person.id)}" ${selected(person.id === employee)}>${esc(person.name)}</option>`).join("")}</select></label>`;
+}
+
 async function movementForm(key) {
   const [id, action] = key.split("/");
   const assign = ["assign","transfer"].includes(action);
   const [item, staff] = await Promise.all([api(`/work/inventory/${id}`), assign ? api("/work/inventory/assignees") : Promise.resolve({items:[]})]);
   if (ui.page !== "inventory") return;
   const last = item.events[0];
-  const hidden = `<input type="hidden" name="action" value="${esc(action)}"><input type="hidden" name="version" value="${item.version}">`;
+  const hidden = `<input type="hidden" name="action" value="${esc(action)}"><input type="hidden" name="version" value="${item.version}">
+    <input type="hidden" name="edit_revision" value="${item.edit_revision}">`;
   const dayLabel = action === "write_off" ? "Дата списания" : "Дата операции";
   const day = `<label>${dayLabel}<input name="day" type="date" required min="${last.day}" max="${work.data.today}" value="${work.data.today}"></label>`;
   if (action === "write_off") {
@@ -358,8 +396,7 @@ async function movementForm(key) {
     return;
   }
   const choices = staff.items.filter(person => person.id !== last.employee);
-  const selectEmployee = assign ? `<label>Сотрудник<select name="employee" aria-label="Сотрудник" required><option value="">Выберите сотрудника</option>
-    ${choices.map(person => `<option value="${esc(person.id)}">${esc(person.name)}</option>`).join("")}</select></label>
+  const selectEmployee = assign ? `${assigneeField(choices)}
     ${choices.length ? "" : '<p class="notice">Для выдачи нужен действующий сотрудник. Его добавляет администратор.</p>'}` : "";
   const relocating = action === "relocate";
   const destination = relocating ? "" : action === "return" ? "Склад" : last.location || "";
@@ -375,6 +412,36 @@ async function movementForm(key) {
       value="${esc(destination)}" placeholder="Например, склад или название точки" ${relocating ? "required" : ""}></label>
     ${day}
     <label>Заметка или реквизиты документа<input name="note" maxlength="500"></label>${act}`, {form:"work-move", id, submit:"Провести операцию"});
+}
+
+async function eventEditForm(id) {
+  const {asset: item, page} = work;
+  const index = item.events.findIndex(event => String(event.id) === id);
+  if (index < 0) return;
+  const event = item.events[index];
+  const previous = item.events[index + 1];
+  const following = item.events[index - 1];
+  let employee = "";
+  if (["assign", "transfer"].includes(event.action)) {
+    const staff = await api("/work/inventory/assignees");
+    if (ui.page !== page || work.asset !== item) return;
+    const choices = staff.items.filter(person => person.id !== previous?.employee);
+    if (event.employee && !choices.some(person => person.id === event.employee)) {
+      choices.push({id:event.employee, name:event.employee_name});
+    }
+    employee = assigneeField(choices, event.employee);
+  }
+  const writingOff = event.action === "write_off";
+  const hint = event.has_saved_act ? '<p class="hint">Исходный акт относится к записи на момент оформления.</p>' : "";
+  drawerView("Редактировать событие", `${work.data.actions[event.action]} · ${item.name}`, `
+    <input type="hidden" name="version" value="${item.version}">
+    <input type="hidden" name="edit_revision" value="${item.edit_revision}">
+    <label>Дата операции<input name="day" type="date" required value="${event.day}"
+      max="${following?.day || work.data.today}" ${previous ? `min="${previous.day}"` : ""}></label>
+    ${employee}${writingOff ? "" : `<label>Место устройства<input name="location" maxlength="160" value="${esc(event.location)}"></label>`}
+    <label>${writingOff ? "Причина списания" : "Заметка или реквизиты документа"}
+      <input name="note" maxlength="500" value="${esc(event.note)}" ${writingOff ? "required" : ""}></label>
+    ${hint}`, {form:"work-edit-event", id:`${item.id}/events/${event.id}`, submit:"Сохранить"});
 }
 
 function serviceForm() {
@@ -494,6 +561,11 @@ async function submitWork(form) {
   const values = new FormData(form);
   const data = Object.fromEntries(values);
   if (data.version) data.version = Number(data.version);
+  if (values.has("edit_revision")) data.edit_revision = Number(data.edit_revision);
+  if (data.warranty_months) {
+    data.warranty_months = Number(data.warranty_months);
+    values.set("warranty_months", String(data.warranty_months));
+  }
   const id = form.dataset.id;
   let result, destination = page, message = "Сохранено.";
   switch (form.dataset.form) {
@@ -522,6 +594,10 @@ async function submitWork(form) {
       break;
     case "work-receive":
       result = await api("/work/inventory", "POST", values);
+      break;
+    case "work-edit-asset":
+    case "work-edit-event":
+      result = await api(`/work/inventory/${id}`, "PUT", data);
       break;
     case "work-move":
       if (values.has("service_months")) data.service_months = Number(data.service_months);
@@ -580,6 +656,8 @@ const workActions = {
   "work-import": importForm,
   "work-receive": receiveForm,
   "work-asset": id => selectRecord(ui.page, id),
+  "work-edit-asset": assetEditForm,
+  "work-edit-event": eventEditForm,
   "work-inventory-filter": filterAssetStatus,
   "work-select-employee": id => selectRecord("admin", id),
   "work-editor": () => work.article?.kind === "section" ? articleForm(null, work.article.id) :

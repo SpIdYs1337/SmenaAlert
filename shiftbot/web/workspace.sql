@@ -35,7 +35,10 @@ CREATE TABLE IF NOT EXISTS assets (
     name TEXT NOT NULL,
     serial TEXT NOT NULL,
     service_months INTEGER CHECK(service_months BETWEEN 1 AND 600),
-    service_revision INTEGER NOT NULL DEFAULT 0
+    service_revision INTEGER NOT NULL DEFAULT 0,
+    purchased_on TEXT,
+    warranty_months INTEGER CHECK(warranty_months BETWEEN 0 AND 600),
+    edit_revision INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS article_media (
     id TEXT PRIMARY KEY,

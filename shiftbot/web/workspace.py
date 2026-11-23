@@ -158,6 +158,13 @@ def workspace_api(service, accounts):
     def asset(item):
         return jsonify(inventory.details(item, now().date()) or abort(404))
 
+    @api.put("/inventory/<item>")
+    @requires("inventory.write")
+    def update_asset(item):
+        if not inventory.edit_asset(item, request_data(), now().date()):
+            abort(404)
+        return jsonify(id=item)
+
     @api.post("/inventory")
     @requires("inventory.write")
     def receive():
@@ -176,6 +183,13 @@ def workspace_api(service, accounts):
     def move(item):
         event = inventory.move(item, request_data(), now(), g.user)
         return jsonify(id=item, event=event), 201
+
+    @api.put("/inventory/<item>/events/<int:event>")
+    @requires("inventory.write")
+    def update_event(item, event):
+        if not inventory.edit_event(item, event, request_data(), now(), g.user):
+            abort(404)
+        return jsonify(id=item, event=event)
 
     @api.get("/inventory/<item>/events/<int:event>/act")
     @requires("inventory.read")

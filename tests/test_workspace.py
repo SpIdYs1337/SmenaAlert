@@ -340,6 +340,114 @@ class WorkspaceTests(unittest.TestCase):
         self.assertIsNone(detail["events"][0]["employee"])
         self.assertEqual((detail["events"][0]["location"], detail["service_months"]), ("Склад",36))
 
+    def test_purchase_and_warranty_can_be_filled_on_receipt_and_corrected_later(self):
+        item = self.send_files("inventory", {"tag": "W-1", "name": "Сканер", "day": "2026-11-20",
+            "purchased_on": "2024-01-31", "warranty_months": "1",
+            "photo": (io.BytesIO(self.sample_photo()), "device.png")})["id"]
+        path = f"inventory/{item}"
+        url = "/api/work/" + path
+        row = self.owner.get(url).json
+        self.assertEqual((row["purchased_on"], row["warranty_months"], row["warranty_expires_on"], row["warranty_expired"]),
+                         ("2024-01-31", 1, "2024-02-29", True))
+        edit = {"tag": "W-1", "name": "Сканер Zebra", "serial": "S-9", "edit_revision": row["edit_revision"],
+                "purchased_on": "2026-10-20", "warranty_months": 1}
+        for invalid in ({"purchased_on": "2026-11-21"}, {"purchased_on": "20261120"},
+                        {"warranty_months": -1}, {"warranty_months": True}, {"warranty_months": 1.5}):
+            self.write(path, {**edit, **invalid}, method="PUT", expect=400)
+        other = self.write("inventory", {"tag": "W-2", "name": "Монитор", "day": "2026-11-20"})["id"]
+        legacy = self.owner.get(f"/api/work/inventory/{other}").json
+        self.assertIsNone(legacy["purchased_on"])
+        self.assertIsNone(legacy["warranty_months"])
+        self.write(path, {**edit, "tag": "w-2"}, method="PUT", expect=409)
+        self.write(path, edit, method="PUT", expect=200)
+        self.write(path, edit, method="PUT", expect=400)
+        row = self.owner.get(url).json
+        self.assertEqual((row["name"], row["serial"], row["warranty_expires_on"], row["warranty_expired"], row["has_photo"]),
+                         ("Сканер Zebra", "S-9", "2026-11-20", False, True))
+        self.write(path, {**edit, "purchased_on": "", "warranty_months": 0, "edit_revision": row["edit_revision"]},
+                   method="PUT", expect=200)
+        row = self.owner.get(url).json
+        self.assertIsNone(row["purchased_on"])
+        self.assertIsNone(row["warranty_expires_on"])
+        self.assertEqual(row["warranty_months"], 0)
+
+    def test_editing_issue_updates_inherited_holder_and_service_dates_atomically(self):
+        first = self.write("employees", {"name": "Первый"})["id"]
+        second = self.write("employees", {"name": "Второй"})["id"]
+        item = self.write("inventory", {"tag": "EDIT-1", "name": "Терминал", "day": "2026-09-29"})["id"]
+        path = f"inventory/{item}"
+        url = "/api/work/" + path
+
+        def move(action, day, **fields):
+            row = self.owner.get(url).json
+            return self.write(path + "/events", {"version": row["version"], "action": action,
+                                                 "day": day, **fields})["event"]
+
+        issue = move("assign", "2026-09-30", employee=first, service_months=1, location="Офис", note="С накладной")
+        move("relocate", "2026-10-02", location="Кабинет")
+        latest = move("relocate", "2026-10-03", location="Стойка")
+        saved_act = self.owner.get(f"{url}/events/{issue}/act").data
+        before = self.owner.get(url).json
+        base = {"version": before["version"], "edit_revision": before["edit_revision"]}
+        command = {**base, "day": "2026-10-01", "employee": second, "location": "Приёмная"}
+        event_path = f"{path}/events/{issue}"
+        for day in ("2026-09-28", "2026-10-03"):
+            self.write(event_path, {**command, "day": day}, method="PUT", expect=400)
+        self.assertEqual(self.owner.get(url).json, before)
+        self.write(event_path, command, method="PUT", expect=200)
+        self.write(event_path, command, method="PUT", expect=400)
+        self.write(path + "/events", {**base, "day": "2026-11-20", "action": "return"}, expect=400)
+        detail = self.owner.get(url).json
+        self.assertEqual(detail["version"], latest)
+        self.assertEqual((detail["employee_name"], detail["service_started_on"], detail["service_expires_on"]),
+                         ("Второй", "2026-10-01", "2026-11-01"))
+        self.assertEqual([row["employee"] for row in detail["events"]], [second, second, second, None])
+        self.assertEqual([row["location"] for row in detail["events"][:3]], ["Стойка", "Кабинет", "Приёмная"])
+        changed = detail["events"][2]
+        self.assertEqual((changed["note"], changed["recorded_at"], changed["editor_name"], changed["has_saved_act"]),
+                         ("С накладной", before["events"][2]["recorded_at"], "admin", True))
+        self.assertEqual(self.owner.get(f"{url}/events/{issue}/act").data, saved_act)
+        with self.db.connection() as conn:
+            audit = conn.execute("SELECT previous FROM asset_event_edits WHERE event=?", (issue,)).fetchone()
+            self.assertEqual(json.loads(audit["previous"]), {"day": "2026-09-30", "location": "Офис",
+                                                             "employee": first, "employee_name": "Первый"})
+        held = self.owner.get("/api/work/inventory", query_string={"employee": second}).json["items"]
+        self.assertEqual([asset["id"] for asset in held], [item])
+
+    def test_archive_corrections_respect_roles_and_adjacent_transfers(self):
+        first = self.write("employees", {"name": "Первый"})["id"]
+        second = self.write("employees", {"name": "Второй"})["id"]
+        item = self.write("inventory", {"tag": "EDIT-2", "name": "Касса", "day": "2026-11-16"})["id"]
+        path = f"inventory/{item}"
+        url = "/api/work/" + path
+
+        def move(action, day, **fields):
+            return self.write(path + "/events", {"version": self.owner.get(url).json["version"],
+                                                 "action": action, "day": day, **fields})["event"]
+
+        issue = move("assign", "2026-11-17", employee=first, service_months=36)
+        move("relocate", "2026-11-18", location="Склад №2")
+        handover = move("transfer", "2026-11-19", employee=second, location="Офис")
+        disposal = move("write_off", "2026-11-20", note="Износ")
+        row = self.owner.get(url).json
+        base = {"version": row["version"], "edit_revision": row["edit_revision"]}
+        self.write(f"{path}/events/{issue}", {**base, "day": "2026-11-17", "employee": second}, method="PUT", expect=400)
+        correction = {**base, "day": "2026-11-19", "location": "Офис №2", "employee": second}
+        self.staff("inventory-reader", ["inventory.read"])
+        reader, token = self.activate("inventory-reader")
+        self.write(f"{path}/events/{handover}", correction, method="PUT", client=reader, token=token, expect=403)
+        self.write(path, {"tag": "EDIT-2", "name": "Касса", "edit_revision": row["edit_revision"]},
+                   method="PUT", client=reader, token=token, expect=403)
+        self.write(f"{path}/events/{2**63}", correction, method="PUT", expect=404)
+        self.write(f"{path}/events/{handover}", correction, method="PUT", expect=200)
+        row = self.owner.get(url).json
+        fix_disposal = {"version": row["version"], "edit_revision": row["edit_revision"],
+                        "day": "2026-11-20", "note": "Неремонтопригодна"}
+        self.write(f"{path}/events/{disposal}", fix_disposal, method="PUT", expect=200)
+        archived = self.owner.get("/api/work/inventory?archived=1").json["items"][0]
+        self.assertEqual((archived["id"], archived["state"], archived["location"], archived["note"]),
+                         (item, "written_off", "Офис №2", "Неремонтопригодна"))
+
     @staticmethod
     def sample_photo():
         raw = io.BytesIO()
@@ -591,3 +699,18 @@ class WorkspaceTests(unittest.TestCase):
                 self.assertTrue(database.preferences()["enabled"])
                 with database.connection() as conn:
                     self.assertEqual(conn.execute("SELECT count(*) FROM employees").fetchone()[0],0)
+
+    def test_upgrade_keeps_existing_asset_and_forms_with_empty_purchase_fields(self):
+        item = self.write("inventory", {"tag": "UPGRADE-1", "name": "Дисплей", "day": "2026-11-20"})["id"]
+        url = f"/api/work/inventory/{item}"
+        before = self.owner.get(url).json
+        act_url = f"{url}/events/{before['version']}/act"
+        act = self.owner.get(act_url).data
+        with self.db.connection() as conn:
+            conn.execute("DROP TABLE asset_event_edits")
+            for column in ("purchased_on", "warranty_months", "edit_revision"):
+                conn.execute(f"ALTER TABLE assets DROP COLUMN {column}")
+        for _ in range(2):
+            Database(self.db.path)
+            self.assertEqual(self.owner.get(url).json, before)
+            self.assertEqual(self.owner.get(act_url).data, act)

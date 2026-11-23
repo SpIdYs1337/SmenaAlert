@@ -60,6 +60,9 @@ class Database:
                 "assets": {
                     "service_months": "INTEGER CHECK(service_months BETWEEN 1 AND 600)",
                     "service_revision": "INTEGER NOT NULL DEFAULT 0",
+                    "purchased_on": "TEXT",
+                    "warranty_months": "INTEGER CHECK(warranty_months BETWEEN 0 AND 600)",
+                    "edit_revision": "INTEGER NOT NULL DEFAULT 0",
                 },
             }
             for table, columns in migrations.items():
@@ -74,6 +77,17 @@ class Database:
                     content BLOB NOT NULL
                 )
             """)
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS asset_event_edits (
+                    id INTEGER PRIMARY KEY,
+                    event INTEGER NOT NULL REFERENCES asset_events(id),
+                    previous TEXT NOT NULL,
+                    edited_at TEXT NOT NULL,
+                    editor TEXT NOT NULL,
+                    editor_name TEXT NOT NULL
+                )
+            """)
+            db.execute("CREATE INDEX IF NOT EXISTS asset_event_edits_event ON asset_event_edits(event,id)")
 
     @staticmethod
     def _migrate_asset_events(db):
